@@ -1344,6 +1344,8 @@ void MainWindow::resetMachiningProgress()
     machining_completed_segment_ids_.clear();
     emergency_stop_requested_ = false;
     machining_refresh_available_ = false;
+    machining_execution_clock_started_ = false;
+    machining_execution_start_time_ = std::chrono::steady_clock::time_point{};
     applyHighlightedSegmentIds(QSet<int>{});
 }
 
@@ -1432,6 +1434,7 @@ bool MainWindow::validateTcpTargetForMachining(QString* out_error) const
 bool MainWindow::prepareMachiningPlan(QString* out_error)
 {
     machining_plan_.all_segment_ids.clear();
+    machining_plan_.segment_end_frames.clear();
     machining_plan_.planned_frames = 0;
     machining_plan_.transport_frames = 0;
 
@@ -1488,12 +1491,16 @@ bool MainWindow::prepareMachiningPlan(QString* out_error)
         return false;
     }
 
-    qint64 total_frames = 7;  // addProcessBegin: two warmup blocks plus BEGIN.
+    const qint64 frames_per_block = nbcam::DataBuffer::DATA_BUF_SIZE / 16;
+    qint64 total_frames = frames_per_block * 2 + 1;  // addProcessBegin: two full warmup blocks plus BEGIN.
     for (const auto& segment : job->segments) {
         if (!segment.points.empty()) {
             machining_plan_.all_segment_ids.insert(segment.id);
+            total_frames += static_cast<qint64>(segment.points.size());
+            machining_plan_.segment_end_frames.emplace_back(segment.id, total_frames);
+        } else {
+            total_frames += static_cast<qint64>(segment.points.size());
         }
-        total_frames += static_cast<qint64>(segment.points.size());
     }
     total_frames += 1;  // END frame.
     machining_plan_.planned_frames = total_frames;
@@ -1623,13 +1630,15 @@ bool MainWindow::sendMachiningPlanContinuous(QString* out_error)
         std::max(30000, comm_config_.tcp_io_timeout_ms * 200));
 
     try {
+        machining_execution_start_time_ = std::chrono::steady_clock::now();
+        machining_execution_clock_started_ = true;
         spdlog::info("Machining frame stream begin: segments={}, laser_output={}, feedback={}",
                      job->segments.size(),
                      machining_laser_output_enabled_ ? "on" : "off",
                      machining_segment_feedback_enabled_ ? "segment" : "summary");
 
         machining_data_buffer_->addProcessBegin();
-        frame_count += 7;  // handleBegin emits two 3-frame warmup blocks, then one BEGIN frame.
+        frame_count += static_cast<qint64>(nbcam::DataBuffer::DATA_BUF_SIZE / 16) * 2 + 1;
 
         for (size_t segment_index = 0; segment_index < job->segments.size(); ++segment_index) {
             const auto& segment = job->segments[segment_index];
@@ -1685,8 +1694,6 @@ bool MainWindow::sendMachiningPlanContinuous(QString* out_error)
                 ++frame_count;
             }
 
-            machining_completed_segment_ids_.insert(segment.id);
-            applyMachiningProgressHighlight(segment.id);
             ++completed_segments;
         }
 
@@ -1710,6 +1717,59 @@ bool MainWindow::sendMachiningPlanContinuous(QString* out_error)
                              .arg(QString::fromStdString(machining_data_buffer_->getLastTransportFeedback()));
         }
         return false;
+    }
+
+    if (machining_execution_clock_started_) {
+        const qint64 planned_frame_count = std::max<qint64>(1, frame_count);
+        const qint64 execution_frames = std::max<qint64>(
+            planned_frame_count,
+            std::max(machining_plan_.planned_frames, machining_plan_.transport_frames));
+        const qint64 execution_wait_ms =
+            std::max<qint64>(250, (execution_frames * 10 + 999) / 1000 + 250);
+        const auto expected_done_time =
+            machining_execution_start_time_ + std::chrono::milliseconds(execution_wait_ms);
+        size_t next_segment_to_mark = 0;
+        bool execution_wait_interrupted = false;
+
+        spdlog::info("Machining execution sync: planned_frames={}, execution_frames={}, wait_ms={}, feedback={}",
+                     planned_frame_count,
+                     execution_frames,
+                     execution_wait_ms,
+                     machining_data_buffer_->getLastTransportFeedback());
+        statusBar()->showMessage(QString("数据已下发，等待振镜按帧执行 %1 ms").arg(execution_wait_ms), 1000);
+
+        while (std::chrono::steady_clock::now() < expected_done_time) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 25);
+            if (emergency_stop_requested_ || machining_run_state_ != MachiningRunState::Running) {
+                execution_wait_interrupted = true;
+                break;
+            }
+            const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - machining_execution_start_time_).count();
+            const qint64 executed_frames = static_cast<qint64>(elapsed_us / 10);
+            while (next_segment_to_mark < machining_plan_.segment_end_frames.size() &&
+                   executed_frames >= machining_plan_.segment_end_frames[next_segment_to_mark].second) {
+                const int segment_id = machining_plan_.segment_end_frames[next_segment_to_mark].first;
+                machining_completed_segment_ids_.insert(segment_id);
+                applyMachiningProgressHighlight(segment_id);
+                ++next_segment_to_mark;
+            }
+            QThread::msleep(10);
+        }
+
+        if (execution_wait_interrupted) {
+            if (out_error) {
+                *out_error = emergency_stop_requested_ ? "加工已急停。" : "加工已暂停。";
+            }
+            return false;
+        }
+
+        while (next_segment_to_mark < machining_plan_.segment_end_frames.size()) {
+            const int segment_id = machining_plan_.segment_end_frames[next_segment_to_mark].first;
+            machining_completed_segment_ids_.insert(segment_id);
+            applyMachiningProgressHighlight(segment_id);
+            ++next_segment_to_mark;
+        }
     }
 
     machining_batch_index_ = static_cast<int>(job->segments.size());
@@ -2049,28 +2109,6 @@ void MainWindow::processMachiningStep()
                       error.toStdString());
         QMessageBox::warning(this, "加工失败", error);
         return;
-    }
-
-    if (!is_simulation_mode_) {
-        const qint64 frames_per_block = nbcam::DataBuffer::DATA_BUF_SIZE / 16;
-        const qint64 max_queued_frames = static_cast<qint64>(nbcam::DataBuffer::DATA_BUF_NUM) * frames_per_block;
-        const qint64 tail_frames = std::min(machining_plan_.transport_frames, max_queued_frames);
-        const qint64 tail_wait_ms = std::max<qint64>(250, (tail_frames * 10 + 999) / 1000 + 250);
-        spdlog::info("Machining transport complete, waiting execution tail: tail_frames={}, wait_ms={}, feedback={}",
-                     tail_frames,
-                     tail_wait_ms,
-                     machining_data_buffer_ ? machining_data_buffer_->getLastTransportFeedback() : std::string());
-        statusBar()->showMessage(QString("数据帧已下发，等待振镜执行队尾 %1 ms").arg(tail_wait_ms), 1000);
-
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(tail_wait_ms);
-        while (std::chrono::steady_clock::now() < deadline) {
-            QCoreApplication::processEvents(QEventLoop::AllEvents, 25);
-            if (emergency_stop_requested_) {
-                spdlog::warn("Machining emergency requested during execution-tail wait; already sent frames cannot be withdrawn from FPGA buffers");
-                break;
-            }
-            QThread::msleep(10);
-        }
     }
 
     spdlog::info("Machining finished: mode={}, segment_feedback={}, planned_frames={}, transport_frames={}, completed_segments={}",

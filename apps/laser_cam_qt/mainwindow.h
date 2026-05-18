@@ -7,7 +7,9 @@
 #include <QSplitter>
 #include <QShowEvent>
 #include <QSet>
+#include <chrono>
 #include <QStringList>
+#include <utility>
 #include <map>
 #include <memory>
 #include <vector>
@@ -281,6 +283,7 @@ private:
 
     struct MachiningPlan {
         QSet<int> all_segment_ids;
+        std::vector<std::pair<int, qint64>> segment_end_frames;
         qint64 planned_frames = 0;
         qint64 transport_frames = 0;
     };
@@ -359,6 +362,8 @@ private:
     bool machining_segment_feedback_enabled_ = true;
     spdlog::level::level_enum machining_previous_log_level_ = spdlog::level::info;
     bool machining_log_level_overridden_ = false;
+    std::chrono::steady_clock::time_point machining_execution_start_time_{};
+    bool machining_execution_clock_started_ = false;
 
 protected:
     void showEvent(QShowEvent *event) override;
