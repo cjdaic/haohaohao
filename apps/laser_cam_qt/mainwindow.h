@@ -279,21 +279,10 @@ private:
         FiveAxis,
     };
 
-    struct MachiningBatch {
-        QByteArray payload;
-        int segment_id = -1;
-        int duration_us = 0;
-        bool mark_output = false;
-        int frame_count = 0;
-        bool flush_after = false;
-    };
-
     struct MachiningPlan {
-        QVector<MachiningBatch> batches;
         QSet<int> all_segment_ids;
         qint64 planned_frames = 0;
         qint64 transport_frames = 0;
-        int forced_block_count = 0;
     };
 
     enum class MachiningRunState {

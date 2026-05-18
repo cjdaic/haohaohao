@@ -1431,11 +1431,9 @@ bool MainWindow::validateTcpTargetForMachining(QString* out_error) const
 
 bool MainWindow::prepareMachiningPlan(QString* out_error)
 {
-    machining_plan_.batches.clear();
     machining_plan_.all_segment_ids.clear();
     machining_plan_.planned_frames = 0;
     machining_plan_.transport_frames = 0;
-    machining_plan_.forced_block_count = 0;
 
     nbcam::LaserJob* const job = controller_ ? controller_->getCurrentJob() : nullptr;
     if (!job || !job->isValid()) {
@@ -1490,177 +1488,28 @@ bool MainWindow::prepareMachiningPlan(QString* out_error)
         return false;
     }
 
-    const auto appendBatch = [this](const QByteArray& payload,
-                                    int segment_id,
-                                    int duration_us,
-                                    bool mark_output,
-                                    int frame_count,
-                                    bool flush_after = false) {
-        if (payload.isEmpty() || frame_count <= 0) {
-            return;
-        }
-        MachiningBatch batch;
-        batch.payload = payload;
-        batch.segment_id = segment_id;
-        batch.duration_us = is_simulation_mode_ ? 1 : std::max(1, duration_us);
-        batch.mark_output = mark_output;
-        batch.frame_count = frame_count;
-        batch.flush_after = flush_after;
-        machining_plan_.batches.push_back(batch);
-        if (segment_id >= 0) {
-            machining_plan_.all_segment_ids.insert(segment_id);
-        }
-    };
-
-    const auto appendControlBatch = [&appendBatch](const QByteArray& payload, bool flush_after = false) {
-        const int frame_count = std::max(1, static_cast<int>(payload.size() / 16));
-        appendBatch(payload, -1, frame_count * 10, false, frame_count, flush_after);
-    };
-
-    auto buildSegmentBatch = [this](const nbcam::LaserJob& source_job,
-                                    const nbcam::PathSegment& segment,
-                                    const nbcam::BoardExecutor::MachineConfig& source_machine_config,
-                                    QString* build_error,
-                                    int* out_frame_count,
-                                    int* out_duration_us,
-                                    bool* out_mark_output) -> QByteArray {
-        QByteArray payload;
-        int frame_count = 0;
-        bool saw_mark_output = false;
-
-        const auto appendFrameBytes = [&payload, &frame_count, &saw_mark_output](const QByteArray& frame_bytes,
-                                                                                  bool mark_output) {
-            payload.append(frame_bytes);
-            frame_count += std::max(1, static_cast<int>(frame_bytes.size() / 16));
-            saw_mark_output = saw_mark_output || mark_output;
-        };
-
-        for (size_t point_index = 0; point_index < segment.points.size(); ++point_index) {
-            const auto& point = segment.points[point_index];
-            MachineEncodedPoint current_encoded{};
-            QString encode_error;
-            if (!encodePointForMachining(source_job,
-                                         point,
-                                         source_machine_config,
-                                         static_cast<size_t>(segment.id),
-                                         point_index,
-                                         &current_encoded,
-                                         &encode_error)) {
-                if (build_error) {
-                    *build_error = encode_error;
-                }
-                return {};
-            }
-
-            const bool point_is_jump = (segment.type == nbcam::SegmentType::JUMP) || (point.laser == 0);
-            const bool mark = !point_is_jump && machining_laser_output_enabled_;
-            appendFrameBytes(packFrameBytes(current_encoded.b,
-                                            current_encoded.a,
-                                            current_encoded.z,
-                                            current_encoded.y,
-                                            current_encoded.x,
-                                            mark ? 0x00FF : 0x0000,
-                                            0,
-                                            0),
-                             mark);
-        }
-        if (out_frame_count) {
-            *out_frame_count = frame_count;
-        }
-        if (out_duration_us) {
-            *out_duration_us = frame_count * 10;
-        }
-        if (out_mark_output) {
-            *out_mark_output = saw_mark_output;
-        }
-        return payload;
-    };
-
-    const QByteArray legacy_warmup_payload =
-        packFrameBytes(0, 0, 0, 0, 0, 0xFF00, 0, 0) +
-        packFrameBytes(0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x0000, 0, 0) +
-        packFrameBytes(0, 0, 0, 0, 0, 0x1100, 0, 0);
-
-    appendControlBatch(legacy_warmup_payload, true);
-    appendControlBatch(legacy_warmup_payload, true);
-    appendControlBatch(packFrameBytes(0, 0, 0, 0, 0, 0xFF00, 0, 0));
-
+    qint64 total_frames = 7;  // addProcessBegin: two warmup blocks plus BEGIN.
     for (const auto& segment : job->segments) {
-        int frame_count = 0;
-        int duration_us = 0;
-        bool mark_output = false;
-        QString build_error;
-        const QByteArray payload = buildSegmentBatch(*job,
-                                                     segment,
-                                                     machine_config,
-                                                     &build_error,
-                                                     &frame_count,
-                                                     &duration_us,
-                                                     &mark_output);
-        if (!build_error.isEmpty()) {
-            if (out_error) {
-                *out_error = build_error;
-            }
-            machining_plan_.batches.clear();
-            machining_plan_.all_segment_ids.clear();
-            return false;
+        if (!segment.points.empty()) {
+            machining_plan_.all_segment_ids.insert(segment.id);
         }
-        appendBatch(payload, segment.id, duration_us, mark_output, frame_count);
+        total_frames += static_cast<qint64>(segment.points.size());
     }
-
-    appendControlBatch(packFrameBytes(0, 0, 0, 0, 0, 0x1100, 0, 0));
-
-    if (machining_plan_.batches.isEmpty()) {
-        if (out_error) {
-            *out_error = "没有生成可发送的数据帧。";
-        }
-        return false;
-    }
-
-    qint64 total_frames = 0;
-    qint64 transport_frames = 0;
-    int forced_block_count = 0;
-    qint64 current_block_bytes = 0;
-    for (const auto& batch : machining_plan_.batches) {
-        total_frames += batch.frame_count;
-        const qint64 payload_bytes = static_cast<qint64>(batch.payload.size());
-        transport_frames += payload_bytes / 16;
-        current_block_bytes += payload_bytes;
-        while (current_block_bytes >= nbcam::DataBuffer::DATA_BUF_SIZE) {
-            current_block_bytes -= nbcam::DataBuffer::DATA_BUF_SIZE;
-        }
-        if (batch.flush_after && current_block_bytes > 0) {
-            transport_frames += (nbcam::DataBuffer::DATA_BUF_SIZE - current_block_bytes) / 16;
-            current_block_bytes = 0;
-            ++forced_block_count;
-        }
-    }
-    if (current_block_bytes > 0) {
-        transport_frames += (nbcam::DataBuffer::DATA_BUF_SIZE - current_block_bytes) / 16;
-        ++forced_block_count;
-    }
+    total_frames += 1;  // END frame.
     machining_plan_.planned_frames = total_frames;
-    machining_plan_.transport_frames = transport_frames;
-    machining_plan_.forced_block_count = forced_block_count;
+    machining_plan_.transport_frames =
+        ((total_frames * 16 + nbcam::DataBuffer::DATA_BUF_SIZE - 1) / nbcam::DataBuffer::DATA_BUF_SIZE) *
+        (nbcam::DataBuffer::DATA_BUF_SIZE / 16);
 
-    spdlog::info("MachiningPlan prepared: batches={}, planned_frames={}, transport_frames={}, forced_blocks={}, segments={}, mode={}, laser_output={}, segment_feedback={}, simulated_frame_duration={}us, tcp={}:{}, delays(on/off/mark/jump/polygon)={}/{}/{}/{}/{}us, jump_speed={}mm/s",
-                 machining_plan_.batches.size(),
+    spdlog::info("MachiningPlan prepared: planned_frames={}, transport_frames={}, segments={}, mode={}, laser_output={}, segment_feedback={}, tcp={}:{}",
                  machining_plan_.planned_frames,
                  machining_plan_.transport_frames,
-                 machining_plan_.forced_block_count,
                  machining_plan_.all_segment_ids.size(),
                  is_simulation_mode_ ? "simulate" : "live",
                  machining_laser_output_enabled_ ? "on" : "off",
                  machining_segment_feedback_enabled_ ? "on" : "off",
-                 is_simulation_mode_ ? 1 : 10,
                  comm_config_.tcp_host.toStdString(),
-                 comm_config_.tcp_port,
-                 comm_config_.laser_on_delay_us,
-                 comm_config_.laser_off_delay_us,
-                 comm_config_.mark_delay_us,
-                 comm_config_.jump_delay_us,
-                 comm_config_.polygon_delay_us,
-                 comm_config_.jump_speed_mm_s);
+                 comm_config_.tcp_port);
 
     return true;
 }
@@ -1732,252 +1581,144 @@ bool MainWindow::sendMachiningPlanContinuous(QString* out_error)
         return false;
     }
 
-    const auto continuous_drain_timeout = std::chrono::milliseconds(
-        std::max(30000, comm_config_.tcp_io_timeout_ms * 200));
-    const auto setDrainError = [this, out_error](const QString& prefix) {
-        if (!out_error) {
-            return;
+    nbcam::LaserJob* const job = controller_ ? controller_->getCurrentJob() : nullptr;
+    if (!job || !job->isValid()) {
+        if (out_error) {
+            *out_error = "当前没有处理好的数据帧。";
         }
-        const QString feedback = QString::fromStdString(machining_data_buffer_->getLastTransportFeedback());
-        const QString state = QString::fromStdString(machining_data_buffer_->describeState());
-        *out_error = QString("%1。状态=%2，batch=%3/%4，batch_offset=%5%6")
-                         .arg(prefix)
-                         .arg(state)
-                         .arg(machining_batch_index_ + 1)
-                         .arg(machining_plan_.batches.size())
-                         .arg(machining_batch_byte_offset_)
-                         .arg(feedback.isEmpty() ? QString() : QString("，反馈=%1").arg(feedback));
-    };
-
-    const auto waitDrainResponsive = [this](std::chrono::milliseconds timeout) {
-        const auto deadline = std::chrono::steady_clock::now() + timeout;
-        while (std::chrono::steady_clock::now() < deadline) {
-            if (emergency_stop_requested_ || machining_run_state_ != MachiningRunState::Running) {
-                return false;
-            }
-            if (machining_data_buffer_ &&
-                machining_data_buffer_->waitUntilIdle(std::chrono::milliseconds(50))) {
-                return true;
-            }
-            QCoreApplication::processEvents(QEventLoop::AllEvents, 25);
-        }
-        return machining_data_buffer_ && machining_data_buffer_->waitUntilIdle(std::chrono::milliseconds(1));
-    };
-
-    const auto waitForWritableBufferResponsive = [this, &setDrainError](std::chrono::milliseconds timeout) {
-        const auto deadline = std::chrono::steady_clock::now() + timeout;
-        while (std::chrono::steady_clock::now() < deadline) {
-            if (emergency_stop_requested_ || machining_run_state_ != MachiningRunState::Running) {
-                return false;
-            }
-            if (machining_data_buffer_ && machining_data_buffer_->hasSpareWriteBuffer()) {
-                return true;
-            }
-            QCoreApplication::processEvents(QEventLoop::AllEvents, 25);
-            QThread::msleep(5);
-        }
-        setDrainError("连续发送模式下双缓冲写入侧没有及时释放空闲缓冲");
         return false;
-    };
-
-    int submitted_full_blocks = 0;
-    const auto paceAfterSubmittedBlock = [this, &submitted_full_blocks](const char* reason) {
-        ++submitted_full_blocks;
-        if (submitted_full_blocks < nbcam::DataBuffer::DATA_BUF_NUM) {
-            return true;
-        }
-
-        const qint64 frames_per_block = nbcam::DataBuffer::DATA_BUF_SIZE / 16;
-        const qint64 wait_ms = std::max<qint64>(1, (frames_per_block * 10 + 999) / 1000);
-        spdlog::info("Machining block pacing: reason={}, submitted_blocks={}, wait_ms={}",
-                     reason,
-                     submitted_full_blocks,
-                     wait_ms);
-
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_ms);
-        while (std::chrono::steady_clock::now() < deadline) {
-            QCoreApplication::processEvents(QEventLoop::AllEvents, 25);
-            if (emergency_stop_requested_ || machining_run_state_ != MachiningRunState::Running) {
-                return false;
-            }
-            QThread::msleep(10);
-        }
-        return true;
-    };
-
-    const int total_batches = static_cast<int>(machining_plan_.batches.size());
-    int start_batch_index = std::max(0, std::min(machining_batch_index_, total_batches));
-    if (start_batch_index >= machining_plan_.batches.size()) {
-        return true;
     }
 
-    for (int batch_index = start_batch_index; batch_index < total_batches; ++batch_index) {
-        const auto& batch = machining_plan_.batches[static_cast<size_t>(batch_index)];
-        const int payload_size = static_cast<int>(batch.payload.size());
-        if (batch.payload.isEmpty()) {
-            machining_batch_index_ = batch_index + 1;
-            machining_batch_byte_offset_ = 0;
-            continue;
-        }
-        QCoreApplication::processEvents(QEventLoop::AllEvents, 25);
-        if (emergency_stop_requested_ || machining_run_state_ != MachiningRunState::Running) {
-            if (out_error) {
-                *out_error = emergency_stop_requested_ ? "加工已急停。" : "加工已暂停。";
+    nbcam::BoardExecutor::MachineConfig machine_config;
+    machine_config.transport.host = comm_config_.tcp_host.toStdString();
+    machine_config.transport.port = static_cast<uint16_t>(comm_config_.tcp_port);
+    machine_config.transport.connect_retry_ms = comm_config_.tcp_connect_retry_ms;
+    machine_config.transport.max_connect_attempts = std::max(1, comm_config_.tcp_max_connect_attempts);
+    machine_config.transport.io_timeout_ms = comm_config_.tcp_io_timeout_ms;
+    machine_config.apply_job_transform = comm_config_.apply_job_transform;
+    machine_config.dry_run_only = true;
+    machine_config.live_laser_enabled = false;
+    machine_config.axis_mode = (comm_config_.axis_mode == AxisMode::FiveAxis)
+        ? nbcam::BoardExecutor::AxisMode::FiveAxis
+        : nbcam::BoardExecutor::AxisMode::ThreeAxis;
+    machine_config.x_axis.offset_mm = comm_config_.x_offset_mm;
+    machine_config.x_axis.limit_min_mm = comm_config_.x_min_mm;
+    machine_config.x_axis.limit_max_mm = comm_config_.x_max_mm;
+    machine_config.y_axis.offset_mm = comm_config_.y_offset_mm;
+    machine_config.y_axis.limit_min_mm = comm_config_.y_min_mm;
+    machine_config.y_axis.limit_max_mm = comm_config_.y_max_mm;
+    machine_config.z_axis.offset_mm = comm_config_.z_offset_mm;
+    machine_config.z_axis.limit_min_mm = comm_config_.z_min_mm;
+    machine_config.z_axis.limit_max_mm = comm_config_.z_max_mm;
+    machine_config.a_axis.offset_mm = comm_config_.a_offset_mm;
+    machine_config.a_axis.limit_min_mm = comm_config_.a_min_mm;
+    machine_config.a_axis.limit_max_mm = comm_config_.a_max_mm;
+    machine_config.b_axis.offset_mm = comm_config_.b_offset_mm;
+    machine_config.b_axis.limit_min_mm = comm_config_.b_min_mm;
+    machine_config.b_axis.limit_max_mm = comm_config_.b_max_mm;
+
+    qint64 frame_count = 0;
+    int completed_segments = 0;
+    const auto drain_timeout = std::chrono::milliseconds(
+        std::max(30000, comm_config_.tcp_io_timeout_ms * 200));
+
+    try {
+        spdlog::info("Machining frame stream begin: segments={}, laser_output={}, feedback={}",
+                     job->segments.size(),
+                     machining_laser_output_enabled_ ? "on" : "off",
+                     machining_segment_feedback_enabled_ ? "segment" : "summary");
+
+        machining_data_buffer_->addProcessBegin();
+        frame_count += 7;  // handleBegin emits two 3-frame warmup blocks, then one BEGIN frame.
+
+        for (size_t segment_index = 0; segment_index < job->segments.size(); ++segment_index) {
+            const auto& segment = job->segments[segment_index];
+            if (segment.points.empty()) {
+                continue;
             }
-            return false;
-        }
-        if (machining_segment_feedback_enabled_) {
-            spdlog::info("Machining send batch {}/{}: segment_id={}, frames={}, bytes={}, block_mode=continuous, flush_after={}, batch_offset={}",
-                         batch_index + 1,
-                         machining_plan_.batches.size(),
-                         batch.segment_id,
-                         batch.frame_count,
-                         batch.payload.size(),
-                         batch.flush_after ? "true" : "false",
-                         machining_batch_byte_offset_);
-            statusBar()->showMessage(QString("发送段 %1/%2，segment=%3，frames=%4")
-                                         .arg(batch_index + 1)
-                                         .arg(machining_plan_.batches.size())
-                                         .arg(batch.segment_id)
-                                         .arg(batch.frame_count),
-                                     1000);
-        } else {
-            spdlog::debug("Machining send batch {}/{}: segment_id={}, frames={}, bytes={}, mode=continuous",
-                          batch_index + 1,
-                          machining_plan_.batches.size(),
-                          batch.segment_id,
-                          batch.frame_count,
-                          batch.payload.size());
-        }
 
-        int batch_offset = (batch_index == machining_batch_index_)
-            ? std::max(0, std::min(machining_batch_byte_offset_, payload_size))
-            : 0;
-        batch_offset -= batch_offset % 16;
-
-        while (batch_offset < payload_size) {
             QCoreApplication::processEvents(QEventLoop::AllEvents, 25);
             if (emergency_stop_requested_ || machining_run_state_ != MachiningRunState::Running) {
-                machining_batch_index_ = batch_index;
-                machining_batch_byte_offset_ = batch_offset;
                 if (out_error) {
                     *out_error = emergency_stop_requested_ ? "加工已急停。" : "加工已暂停。";
                 }
                 return false;
             }
 
-            const size_t current_offset = machining_data_buffer_->currentWriteOffset();
-            const size_t block_remaining = static_cast<size_t>(nbcam::DataBuffer::DATA_BUF_SIZE) - current_offset;
-            const bool has_spare_write_buffer = machining_data_buffer_->hasSpareWriteBuffer();
-            if (block_remaining < 16 || (!has_spare_write_buffer && block_remaining <= 16)) {
-                if (!waitForWritableBufferResponsive(continuous_drain_timeout)) {
-                    if (out_error && out_error->isEmpty()) {
-                        *out_error = emergency_stop_requested_ ? "加工已急停。" : "加工已暂停。";
-                    }
-                    return false;
-                }
-                continue;
-            }
-
-            size_t max_writable = block_remaining - (block_remaining % 16);
-            if (!has_spare_write_buffer) {
-                max_writable -= 16;
-            }
-            int bytes_to_write = std::min(payload_size - batch_offset,
-                                          static_cast<int>(max_writable));
-            if (bytes_to_write <= 0) {
-                if (!waitForWritableBufferResponsive(continuous_drain_timeout)) {
-                    if (out_error && out_error->isEmpty()) {
-                        *out_error = emergency_stop_requested_ ? "加工已急停。" : "加工已暂停。";
-                    }
-                    return false;
-                }
-                continue;
-            }
-
-            machining_data_buffer_->appendBytes(batch.payload.constData() + batch_offset,
-                                                static_cast<size_t>(bytes_to_write));
-            batch_offset += bytes_to_write;
-            machining_batch_index_ = batch_index;
-            machining_batch_byte_offset_ = batch_offset;
-
-            if (machining_data_buffer_->currentWriteOffset() == 0) {
-                if (!paceAfterSubmittedBlock("full_block")) {
-                    if (out_error && out_error->isEmpty()) {
-                        *out_error = emergency_stop_requested_ ? "加工已急停。" : "加工已暂停。";
-                    }
-                    return false;
-                }
-                if (!machining_data_buffer_->hasSpareWriteBuffer() &&
-                    !waitForWritableBufferResponsive(continuous_drain_timeout)) {
-                    if (out_error && out_error->isEmpty()) {
-                        *out_error = emergency_stop_requested_ ? "加工已急停。" : "加工已暂停。";
-                    }
-                    return false;
-                }
-            }
-        }
-
-        machining_batch_index_ = batch_index + 1;
-        machining_batch_byte_offset_ = 0;
-        if (batch.segment_id >= 0) {
-            machining_completed_segment_ids_.insert(batch.segment_id);
-            applyMachiningProgressHighlight(batch.segment_id);
             if (machining_segment_feedback_enabled_) {
-                spdlog::info("Machining segment queued: segment_id={}, completed={}/{}",
-                             batch.segment_id,
-                             machining_completed_segment_ids_.size(),
-                             machining_plan_.all_segment_ids.size());
+                spdlog::info("Machining stream segment {}/{}: segment_id={}, points={}",
+                             segment_index + 1,
+                             job->segments.size(),
+                             segment.id,
+                             segment.points.size());
+                statusBar()->showMessage(QString("发送段 %1/%2，segment=%3，points=%4")
+                                             .arg(segment_index + 1)
+                                             .arg(job->segments.size())
+                                             .arg(segment.id)
+                                             .arg(segment.points.size()),
+                                         1000);
             }
+
+            for (size_t point_index = 0; point_index < segment.points.size(); ++point_index) {
+                const auto& point = segment.points[point_index];
+                MachineEncodedPoint encoded{};
+                QString encode_error;
+                if (!encodePointForMachining(*job,
+                                             point,
+                                             machine_config,
+                                             segment_index,
+                                             point_index,
+                                             &encoded,
+                                             &encode_error)) {
+                    if (out_error) {
+                        *out_error = encode_error;
+                    }
+                    return false;
+                }
+
+                const bool point_is_jump = (segment.type == nbcam::SegmentType::JUMP) || (point.laser == 0);
+                if (point_is_jump || !machining_laser_output_enabled_) {
+                    machining_data_buffer_->addProcessJumpData(encoded.x, encoded.y, encoded.z, encoded.a, encoded.b);
+                } else {
+                    machining_data_buffer_->addProcessData(encoded.x, encoded.y, encoded.z, encoded.a, encoded.b);
+                }
+                ++frame_count;
+            }
+
+            machining_completed_segment_ids_.insert(segment.id);
+            applyMachiningProgressHighlight(segment.id);
+            ++completed_segments;
         }
 
-        if (batch.flush_after && machining_data_buffer_->currentWriteOffset() > 0) {
-            if (!machining_data_buffer_->hasSpareWriteBuffer() &&
-                !waitForWritableBufferResponsive(continuous_drain_timeout)) {
-                if (out_error && out_error->isEmpty()) {
-                    *out_error = emergency_stop_requested_ ? "加工已急停。" : "加工已暂停。";
-                }
-                return false;
-            }
-            const size_t flush_bytes = machining_data_buffer_->currentWriteOffset();
-            machining_data_buffer_->forceFill();
-            spdlog::info("Machining forced block flush after batch {}/{}: payload_bytes={}, block_bytes={}",
-                         batch_index + 1,
-                         machining_plan_.batches.size(),
-                         flush_bytes,
-                         nbcam::DataBuffer::DATA_BUF_SIZE);
-            if (!paceAfterSubmittedBlock("forced_flush")) {
-                if (out_error && out_error->isEmpty()) {
-                    *out_error = emergency_stop_requested_ ? "加工已急停。" : "加工已暂停。";
-                }
-                return false;
-            }
+        machining_data_buffer_->addProcessEnd();
+        machining_data_buffer_->forceFill();
+        ++frame_count;
+    } catch (const std::exception& e) {
+        if (out_error) {
+            *out_error = QString("加工数据帧发送失败: %1，状态=%2，反馈=%3")
+                             .arg(QString::fromStdString(e.what()))
+                             .arg(QString::fromStdString(machining_data_buffer_->describeState()))
+                             .arg(QString::fromStdString(machining_data_buffer_->getLastTransportFeedback()));
         }
+        return false;
     }
 
-    if (machining_data_buffer_->currentWriteOffset() > 0 &&
-        !machining_data_buffer_->hasSpareWriteBuffer() &&
-        !waitForWritableBufferResponsive(continuous_drain_timeout)) {
-        if (out_error && out_error->isEmpty()) {
-            *out_error = emergency_stop_requested_ ? "加工已急停。" : "加工已暂停。";
+    if (!machining_data_buffer_->waitUntilIdle(drain_timeout)) {
+        if (out_error) {
+            *out_error = QString("加工数据帧已写入双缓冲，但TCP发送线程未在超时时间内排空。状态=%1，反馈=%2")
+                             .arg(QString::fromStdString(machining_data_buffer_->describeState()))
+                             .arg(QString::fromStdString(machining_data_buffer_->getLastTransportFeedback()));
         }
         return false;
     }
-    machining_data_buffer_->forceFill();
-    if (!paceAfterSubmittedBlock("final_flush")) {
-        if (out_error && out_error->isEmpty()) {
-            *out_error = emergency_stop_requested_ ? "加工已急停。" : "加工已暂停。";
-        }
-        return false;
-    }
-    if (!waitDrainResponsive(continuous_drain_timeout)) {
-        setDrainError("连续发送模式下加工数据已写入缓冲，但发送线程未在超时时间内排空");
-        return false;
-    }
+
+    machining_batch_index_ = static_cast<int>(job->segments.size());
+    machining_batch_byte_offset_ = 0;
     spdlog::info("Machining transport drained: batches={}, planned_frames={}, transport_frames={}, feedback={}",
-                 machining_plan_.batches.size(),
-                 machining_plan_.planned_frames,
-                 machining_plan_.transport_frames,
+                 completed_segments,
+                 frame_count,
+                 ((frame_count * 16 + nbcam::DataBuffer::DATA_BUF_SIZE - 1) / nbcam::DataBuffer::DATA_BUF_SIZE) *
+                     (nbcam::DataBuffer::DATA_BUF_SIZE / 16),
                  machining_data_buffer_->getLastTransportFeedback());
     return true;
 }
@@ -2140,11 +1881,11 @@ void MainWindow::onStartMachining()
     if (machining_run_state_ == MachiningRunState::Paused) {
         machining_run_state_ = MachiningRunState::Running;
         machining_refresh_available_ = false;
-        spdlog::info("Machining resume: mode={}, laser_output={}, next_batch={}/{}",
+        spdlog::info("Machining resume: mode={}, laser_output={}, completed_segments={}/{}",
                      is_simulation_mode_ ? "simulate" : "live",
                      machining_laser_output_enabled_ ? "on" : "off",
-                     machining_batch_index_ + 1,
-                     machining_plan_.batches.size());
+                     machining_completed_segment_ids_.size(),
+                     machining_plan_.all_segment_ids.size());
         updateMachiningUiState();
         processMachiningStep();
         return;
@@ -2198,10 +1939,10 @@ void MainWindow::onPauseMachining()
     if (machining_timer_) {
         machining_timer_->stop();
     }
-    spdlog::info("Machining pause: mode={}, current_batch={}/{}",
+    spdlog::info("Machining pause: mode={}, completed_segments={}/{}",
                  is_simulation_mode_ ? "simulate" : "live",
-                 machining_batch_index_,
-                 machining_plan_.batches.size());
+                 machining_completed_segment_ids_.size(),
+                 machining_plan_.all_segment_ids.size());
     updateMachiningUiState();
     statusBar()->showMessage("加工已暂停", 3000);
 }
@@ -2209,10 +1950,10 @@ void MainWindow::onPauseMachining()
 void MainWindow::onEmergencyStop()
 {
     emergency_stop_requested_ = true;
-    spdlog::warn("Machining emergency stop requested: mode={}, current_batch={}/{}",
+    spdlog::warn("Machining emergency stop requested: mode={}, completed_segments={}/{}",
                  is_simulation_mode_ ? "simulate" : "live",
-                 machining_batch_index_,
-                 machining_plan_.batches.size());
+                 machining_completed_segment_ids_.size(),
+                 machining_plan_.all_segment_ids.size());
     if (machining_data_buffer_) {
         // 预留激光器关光/关快门命令位置。
         machining_data_buffer_->stopTcpThread();
@@ -2332,10 +2073,9 @@ void MainWindow::processMachiningStep()
         }
     }
 
-    spdlog::info("Machining finished: mode={}, segment_feedback={}, total_batches={}, planned_frames={}, transport_frames={}, completed_segments={}",
+    spdlog::info("Machining finished: mode={}, segment_feedback={}, planned_frames={}, transport_frames={}, completed_segments={}",
                  is_simulation_mode_ ? "simulate" : "live",
                  machining_segment_feedback_enabled_ ? "on" : "off",
-                 machining_plan_.batches.size(),
                  machining_plan_.planned_frames,
                  machining_plan_.transport_frames,
                  machining_completed_segment_ids_.size());
