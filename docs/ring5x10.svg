@@ -1,0 +1,89 @@
+<!--?xml version="1.0" encoding="UTF-8"?-->
+<svg xmlns="http://www.w3.org/2000/svg" width="29mm" height="14mm" viewBox="0 0 29 14">
+
+  <!-- 参数说明
+       外径 = 2mm (R = 1)
+       内径 = 1mm (r = 0.5)
+       阵列中心距 = 3mm
+       列数 = 10, 行数 = 5
+  -->
+
+  <!-- 定义一个圆环符号 -->
+  <defs>
+    <g id="ring">
+      <path d="
+        M 1 0
+        A 1 1 0 1 0 -1 0
+        A 1 1 0 1 0 1 0
+        M 0.5 0
+        A 0.5 0.5 0 1 1 -0.5 0
+        A 0.5 0.5 0 1 1 0.5 0
+      " fill="black" fill-rule="evenodd"></path>
+    </g>
+  </defs>
+
+  <!-- 5 × 10 阵列 -->
+  <!-- 行 -->
+  <g transform="translate(1 1)">
+    <!-- y = 0 -->
+    <use href="#ring" x="0" y="0"></use>
+    <use href="#ring" x="3" y="0"></use>
+    <use href="#ring" x="6" y="0"></use>
+    <use href="#ring" x="9" y="0"></use>
+    <use href="#ring" x="12" y="0"></use>
+    <use href="#ring" x="15" y="0"></use>
+    <use href="#ring" x="18" y="0"></use>
+    <use href="#ring" x="21" y="0"></use>
+    <use href="#ring" x="24" y="0"></use>
+    <use href="#ring" x="27" y="0"></use>
+
+    <!-- y = 3 -->
+    <use href="#ring" x="0" y="3"></use>
+    <use href="#ring" x="3" y="3"></use>
+    <use href="#ring" x="6" y="3"></use>
+    <use href="#ring" x="9" y="3"></use>
+    <use href="#ring" x="12" y="3"></use>
+    <use href="#ring" x="15" y="3"></use>
+    <use href="#ring" x="18" y="3"></use>
+    <use href="#ring" x="21" y="3"></use>
+    <use href="#ring" x="24" y="3"></use>
+    <use href="#ring" x="27" y="3"></use>
+
+    <!-- y = 6 -->
+    <use href="#ring" x="0" y="6"></use>
+    <use href="#ring" x="3" y="6"></use>
+    <use href="#ring" x="6" y="6"></use>
+    <use href="#ring" x="9" y="6"></use>
+    <use href="#ring" x="12" y="6"></use>
+    <use href="#ring" x="15" y="6"></use>
+    <use href="#ring" x="18" y="6"></use>
+    <use href="#ring" x="21" y="6"></use>
+    <use href="#ring" x="24" y="6"></use>
+    <use href="#ring" x="27" y="6"></use>
+
+    <!-- y = 9 -->
+    <use href="#ring" x="0" y="9"></use>
+    <use href="#ring" x="3" y="9"></use>
+    <use href="#ring" x="6" y="9"></use>
+    <use href="#ring" x="9" y="9"></use>
+    <use href="#ring" x="12" y="9"></use>
+    <use href="#ring" x="15" y="9"></use>
+    <use href="#ring" x="18" y="9"></use>
+    <use href="#ring" x="21" y="9"></use>
+    <use href="#ring" x="24" y="9"></use>
+    <use href="#ring" x="27" y="9"></use>
+
+    <!-- y = 12 -->
+    <use href="#ring" x="0" y="12"></use>
+    <use href="#ring" x="3" y="12"></use>
+    <use href="#ring" x="6" y="12"></use>
+    <use href="#ring" x="9" y="12"></use>
+    <use href="#ring" x="12" y="12"></use>
+    <use href="#ring" x="15" y="12"></use>
+    <use href="#ring" x="18" y="12"></use>
+    <use href="#ring" x="21" y="12"></use>
+    <use href="#ring" x="24" y="12"></use>
+    <use href="#ring" x="27" y="12"></use>
+  </g>
+
+</svg>

@@ -1,0 +1,68 @@
+# Build directories
+build/
+bin/
+lib/
+*.user
+*.suo
+*.sdf
+*.opensdf
+*.db
+*.opendb
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+_deps/
+
+# Visual Studio
+.vs/
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.sln
+x64/
+x86/
+Debug/
+Release/
+Win32/
+
+# Qt
+*.moc
+moc_*.cpp
+moc_*.h
+qrc_*.cpp
+ui_*.h
+*.qmlc
+*.jsc
+
+# Generated protobuf files
+*.pb.h
+*.pb.cc
+*_grpc.pb.h
+*_grpc.pb.cc
+
+# Logs
+*.log
+log/
+
+# Local backups and temporary work
+backups/
+tmp/
+
+# Generated test/build directories
+build_test/
+
+# Installer/package caches
+ChiikawaLaser-cache/
+ChiikawaLaser-SetupFiles/
+
+# Generated machining jobs can exceed GitHub's file size limits
+job/*.dcj
+
+# OS
+.DS_Store
+Thumbs.db

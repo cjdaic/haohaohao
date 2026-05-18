@@ -1,0 +1,127 @@
+syntax = "proto3";
+
+service FiveAxis{
+    rpc ProcessLine (LineData) returns (ServerReply) {}
+    rpc ProcessCircle (CircleData) returns (ServerReply) {}
+    rpc SetLaserFreq (FreqData) returns (ServerReply){}
+    rpc ProcessRectangle (RectangleData) returns (ServerReply){}
+    rpc ProcessRectangle3D (Rectangle3DData) returns (ServerReply){}
+    rpc ProcessEllipse (EllipseData) returns (ServerReply){}
+    rpc Test1 (ServerReply) returns (ServerReply){}
+    rpc Test2 (ServerReply) returns (ServerReply){}
+    rpc SetDelay (DelayData) returns (ServerReply) {}
+}
+
+message LineData{
+    double speed = 1;
+    int32 times = 2;
+    double X1 = 3;
+    double Y1 = 4;
+    double Z1 = 5;
+    double A1 = 6;
+    double B1 = 7;
+    double X2 = 8;
+    double Y2 = 9;
+    double Z2 = 10;
+    double A2 = 11;
+    double B2 = 12;
+    bool isLast = 13;
+    
+}
+
+message CircleData{
+    double speed = 1;
+    int32 times = 2;
+    double X1 = 3;
+    double Y1 = 4;
+    double X2 = 5;
+    double Y2 = 6;
+    int32 M = 7;
+    double angle = 8;
+    double taper = 9;
+
+    // 同心圆
+    bool filled = 10;
+    double r_min = 11;
+    double r_interval = 12;
+    double z_start = 13;
+    double z_end = 14;
+    double z_interval = 15;
+    bool isLast = 16;
+    int32 circle_num_repair = 17;
+    int32 times_repair = 18;
+
+
+}
+
+message RectangleData{
+    double X0 = 1;
+    double Y0 = 2;
+    double X1 = 3;
+    double Y1 = 4;
+    double taper_A_Max = 5;
+    double taper_B_Max = 6;
+    double FeedSpacing_X = 7;
+    double FeedSpacing_Y = 8;
+    double speed = 9;
+    double z_start = 11; 
+    double z_end = 12; 
+    double z_interval = 13;
+    int32 times = 14;
+    bool isLast = 15;
+    int32 circle_num_repair = 16;
+    int32 times_repair = 17;
+    double X2 = 18;
+    double Y2 = 19;
+}
+message EllipseData{
+    double X0 = 1;
+    double Y0 = 2;
+    double a_Max = 3;
+    double b_Max = 4;
+    double taper_A_Max = 5;
+    double taper_B_Max = 6;
+    double FeedSpacing_X = 7;
+    double FeedSpacing_Y = 8;
+    double speed = 9;
+    double z_start = 11; 
+    double z_end = 12; 
+    double z_interval = 13;
+    int32 times = 14;
+    bool isLast = 15;
+    int32 circle_num_repair = 16;
+    int32 times_repair = 17;
+    double a_Min = 18;
+    double b_Min = 19;
+}
+
+message Rectangle3DData{
+    double X0 = 1;
+    double Y0 = 2;
+    double Z0 = 3;
+    double X1 = 4;
+    double Y1 = 5;
+    double Z1 = 6;
+    double speed = 7;
+    double interval = 8;
+    int32 times = 9;
+    bool isLast = 10;
+}
+
+message DelayData{
+    int32 JUMP_SPEED = 1;
+    int32 LASER_ON_DELAY = 2;
+    int32 LASER_OFF_DELAY = 3;
+    int32 MARK_DELAY = 4;
+    int32 JUMP_DELAY = 5;
+    int32 POLYGON_DELAY = 6;
+}
+
+message FreqData{
+    int32 freq = 1;
+}
+
+message ServerReply{
+    int32 code = 1;
+    string message = 2;
+}

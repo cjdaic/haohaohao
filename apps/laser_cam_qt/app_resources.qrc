@@ -1,0 +1,12 @@
+<RCC>
+    <qresource prefix="/app_icons">
+        <file alias="chiikawa.ico">../../assets/icon/chiikawa.ico</file>
+    </qresource>
+    <qresource prefix="/view_icons">
+        <file alias="start.svg">../../assets/view/start.svg</file>
+        <file alias="pause.svg">../../assets/view/pause.svg</file>
+        <file alias="stop.svg">../../assets/view/stop.svg</file>
+        <file alias="simulate.svg">../../assets/view/simulate.svg</file>
+        <file alias="refresh.svg">../../assets/view/refresh.svg</file>
+    </qresource>
+</RCC>

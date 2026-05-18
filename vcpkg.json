@@ -1,0 +1,35 @@
+{
+  "name": "nbcam",
+  "version": "0.0.1",
+  "description": "基于纹理映射的复杂曲面激光标刻系统",
+  "dependencies": [
+    {
+      "name": "cgal",
+      "version>=": "5.0"
+    },
+    {
+      "name": "grpc",
+      "version>=": "1.50"
+    },
+    {
+      "name": "protobuf",
+      "version>=": "3.21"
+    },
+    {
+      "name": "nlohmann-json",
+      "version>=": "3.11"
+    },
+    {
+      "name": "spdlog",
+      "version>=": "1.11"
+    },
+    {
+      "name": "nanosvg",
+      "version>=": "1.0"
+    },
+    {
+      "name": "clipper2",
+      "version>=": "2.0.1"
+    }
+  ]
+}

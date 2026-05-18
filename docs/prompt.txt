@@ -1,0 +1,287 @@
+基于纹理映射的复杂曲面激光标刻系统 项目名 NBCAM 版本0.0.1
+开发文档（Architecture & Development Doc）
+1. 项目定位与核心思想
+
+课题目标（闭环）：实现从“曲面模型 → 参数化UV → 纹理/图案生成 → 映射回三维 → 生成带工艺参数的路径 → 驱动载于课题组自研板卡的多轴振镜加工”的最小可用闭环，并在此基础上支持按曲率/几何特征动态调参（P/f/v 等）与工艺策略扩展。
+
+核心方法论（你的研究亮点）
+把复杂曲面加工问题转化为纹理空间（UV）里的“二维图案加工问题”：
+
+对曲面网格做 UV 参数化（ABF / ARAP / Boundary-first-flattening 等可切换）。
+
+在 UV 平面上 生成加工图案：轮廓、栅格、环形、纹理图像(导入.svg文件)等。
+
+把 UV 采样点 映射回三维 XYZ，并附加工艺参数（P/f/v、激光开关、跳线等）。
+
+将路径下发给 师兄板卡（经 TCP/gRPC 服务转发）或者RTC-6，完成标刻，板卡数据输入参考。
+
+2. 系统总体架构
+2.1 分层结构（推荐）
+
+UI 层（Qt）
+
+模型视图（3D基于vtk）/ UV 视图（2D类似qcad）/ 路径预览（叠加）
+
+工艺参数面板（全局 + 分段 + 按规则自动生成）
+
+作业队列/状态监控/日志
+
+几何与算法层（C++）(CGAL)
+
+网格导入/预处理（OBJ/STL，修复、法向、尺度、分区等）(CGAL)
+
+UV 参数化（可插拔）
+
+图案与填充策略（可插拔）
+
+UV→XYZ 映射与重采样
+
+工艺参数分配（按曲率/能量/图层）
+
+路径后处理（分段、跳线、速度/功率/频率点位更新策略）
+
+任务/通信层（可选同进程或独立进程）
+
+Job 序列化：laser_job.json（可升级 Protobuf）
+
+本地 TCP/gRPC 服务：UI 内置服务或外置服务均可
+
+下位机/驱动： DataBuffer 发送层 参考DataBuffer.cs/DataGenerator.cs,需移植成C++插入项目中
+
+硬件执行层（师兄板卡+杰普特M8激光器+振镜）
+
+Calibration Layer (标定层)： 负责计算 模型坐标 ->振镜坐标 的变换矩阵 + 模型基准面(只加工基准面以上的区域)设定
+
+振镜运动、激光开关、功率/频率/速度实时更新（按设备能力选择“段级更新”或“点级更新”）
+
+3. 关键工作流（从导入到加工）
+
+Import：加载 OBJ/STL → 生成三角网格（CGAL）
+
+Preprocess：修复/去噪/法向统一/缩放/坐标系对齐（与振镜工作坐标一致）
+
+UV Parameterization：选择算法（ABF/ARAP/BFF）→ 得到每个顶点 UV
+
+Pattern in UV：在 UV 平面生成图案
+
+基本图元：线/圆/矩形/椭圆/多边形
+
+填充：线往复/栅格/等距偏置/环形/纹理图像采样
+
+Map UV→XYZ：对 UV 路径点定位到三角面并插值回 XYZ
+
+Assign Process Params：为路径点/路径段赋值工艺参数
+
+全局参数：基准 P/f/v、重复次数、延时等
+
+自适应参数：按曲率/高度/入射角/能量模型分配
+
+Postprocess：分段、跳线、拐角减速、参数更新稀疏化
+
+Export/Send：导出 laser_job.json 或 Protobuf → 本地服务/驱动下发 → 加工
+
+Verify：仿真预览（路径 + 速度/功率图层）→ 统计（长度、时间估计、能量分布）
+
+4. 数据模型规范（laser_job.json）
+4.1 设计原则
+
+能表达“加工意图”：图案/填充/策略 + 参数 + 路径
+
+能表达“硬件执行”：跳线/激光开关/分段/时序
+
+可扩展：未来替换为 Protobuf/二进制流，不改上层逻辑
+
+加工模型大小约2000kb以内
+
+4.2 建议字段（最小可用 + 可扩展）可删减优化
+{
+  "meta": {
+    "job_id": "2026-01-19T-job-001",
+    "units": "mm",
+    "source_model": "part.stl",
+    "created_at": "2026-01-19T10:00:00-08:00"
+  },
+  "coordinate": {
+    "workplane": "z=0",
+    "machine_frame": "laser_head_top",
+    "transform_model_to_machine": [16 numbers]
+  },
+  "parameterization": {
+    "algorithm": "ABF",
+    "uv_island_count": 1,
+    "notes": ""
+  },
+  "process_defaults": {
+    "power_w": 20.0,
+    "freq_hz": 20000,
+    "speed_mm_s": 300.0,
+    "laser_on_delay_us": 0,
+    "laser_off_delay_us": 0
+  },
+  "segments": [
+    {
+      "id": 0,
+      "type": "mark", 
+      "strategy": "contour|hatch|ring|image_sample",
+      "params_override": { "power_w": 18.0, "speed_mm_s": 250.0 },
+      "points": [
+        {
+          "u": 0.12, "v": 0.45,
+          "x": 10.2, "y": -3.8, "z": 0.0,
+          "laser": 1,
+          "power_w": 18.0,
+          "freq_hz": 22000,
+          "speed_mm_s": 250.0
+        }
+      ]
+    },
+    {
+      "id": 1,
+      "type": "jump",
+      "points": [
+        { "x": 10.2, "y": -3.8, "z": 0.0, "laser": 0, "speed_mm_s": 800.0 }
+      ]
+    }
+  ]
+}
+
+
+实际落地建议：段级覆盖（params_override） + 点级可选覆盖。硬件不支持点级实时更新时，把点级参数“压缩/稀疏化”为段级或关键点更新。
+
+5. 模块划分与接口（可插拔设计）
+5.1 模块清单
+
+MeshIO：OBJ/STL 导入、网格构建、法向/拓扑检查
+
+Param：参数化算法接口 + 多实现（ABF/ARAP/BFF）
+
+UVPattern：UV 平面图案生成（图元、布尔、偏置、采样）
+
+Mapper：UV→XYZ（面定位、插值、边界处理、岛屿切换）
+
+ProcessField：工艺场生成（曲率/高度/能量模型 → P/f/v）
+
+Planner：路径后处理（分段、跳线、减速、采样密度、排序）
+
+Serializer：JSON/Proto 编解码
+
+Executor：1师兄板卡:DataBuffer(我提供的) 
+2 rtc-6板卡（外部服务）
+
+Sim：可视化仿真（3D/UV/热力图/参数图层）
+
+App：Qt UI、任务队列、日志、配置
+
+5.2 插件点（你未来工作最省心的地方）
+
+参数化算法：IParameterizer
+
+填充策略：IFillStrategy
+
+工艺参数生成：IProcessModel
+
+执行器：IJobExecutor（自研板卡 / Rtc-6/ Mock / FileOnly）
+
+6. Qt 端软件形态（建议的界面与交互）
+6.1 主要视图
+
+3D 模型视图：网格、法向、选区、UV岛高亮
+
+UV 视图：显示 UV 三角网格 + 图案 + 路径
+
+路径预览：按类型上色（mark/jump）、按功率/速度分层显示
+
+日志/状态：连接状态、缓冲进度、当前段、错误码
+
+6.2 参数面板（统一“全局加工参数 + 扫描参数设置区”）
+
+全局：基准 P/f/v、重复次数、加速度、延时、跳线速度
+
+图案：图元参数、填充间距、方向、边界偏置、轮廓次数
+
+自适应：曲率采样半径、映射函数、上限/下限、分层规则
+
+设备：标定矩阵、工作幅面、F-theta 畸变补偿开关
+
+7. 通信与部署方案（推荐路线）
+
+你现在的目标是“更自动化 + 全部整合在 Qt 侧"：
+
+服务化（更利于扩展与稳定）
+Qt/C++：生成 laser_job →通过软件启动 本地 gRPC/TCP 服务 → 执行器进程→师兄板卡(移植DataBuffer+DataGenerator）/RTC6 由相应的DLL
+
+
+8. 关键工程难点与对应策略
+
+UV 岛与缝（seam）处理
+
+路径跨岛：强制切段 + jump；或在 UV 生成阶段限制在单岛
+
+UV→XYZ 定位鲁棒性
+
+使用 “点落在哪个三角面” 的加速结构（BVH/AABB tree）
+
+对边界/数值误差做容错（投影 + 最近面回退）
+
+参数实时更新的硬件限制
+
+点级更新不一定可行 → 采用“段级更新 + 关键点更新”
+
+振镜几何标定
+
+明确 transform_model_to_machine 的来源（标定板/标定点拟合）
+
+必须支持：缩放、旋转、平移、镜像、畸变补偿开关
+
+9. 验收标准（阶段性里程碑）
+
+MVP（必须完成的最小闭环）加工简单的圆锥/圆柱/凹凸面即可
+
+导入 OBJ/STL
+
+参数化得到 UV
+
+UV 生成至少两类图案（轮廓 + 栅格/环形其一）
+
+映射回 XYZ，导出 laser_job.json
+
+自己板卡 成功加工（可只做二维 Z=0 平面）/ Rtc-6板卡兼容演示即可
+
+UI 可预览路径与 mark/jump 分段
+
+M2（面向论文与可验证性）
+
+按曲率/几何特征生成 P/f/v 图层
+
+统计能量/速度分布并可视化
+
+加工对比实验：固定参数 vs 自适应参数（至少两组样件）
+
+10. 推荐的仓库目录结构 可修改
+/apps
+  /laser_cam_qt            # Qt UI 工程
+/core
+  /mesh                    # MeshIO, preprocess
+  /param                   # parameterization interfaces & impl
+  /pattern                 # UV pattern & fill strategies
+  /mapping                 # UV->XYZ mapper + acceleration
+  /process                 # curvature/energy based params
+  /planner                 # segment/jump/postprocess
+  /job                     # job model + serializer(json/proto)
+  /executor                # board/rtc-6 compatible executor + mock executor
+  /sim                     # visualization helpers
+/docs
+  architecture.md
+  data_format_laser_job.md
+  executor_myboard.md
+  executor_rtc-6.md
+  roadmap.md
+/tests
+  unit/
+  integration/
+
+11.使用目录 
+QT                                           6.10.1       D:\Qt\6.10.1\msvc2022_64
+# OpenCascade已移除，不再使用
+vtk      （已编译）                   9.4.2         E:\VTK-9.4.2\install
+CGAL,gRPC,  --vcpkg管理
