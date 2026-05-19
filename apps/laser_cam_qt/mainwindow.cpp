@@ -839,7 +839,6 @@ MainWindow::MainWindow(QWidget *parent)
     , machining_refresh_button_(nullptr)
     , machining_simulate_button_(nullptr)
     , machining_timer_(nullptr)
-    , machining_progress_timer_(nullptr)
     , texture_editor_dialog_(nullptr)
     , texture_details_dialog_(nullptr)
     , plan_path_action_(nullptr)
@@ -849,9 +848,6 @@ MainWindow::MainWindow(QWidget *parent)
     machining_timer_ = new QTimer(this);
     machining_timer_->setSingleShot(true);
     connect(machining_timer_, &QTimer::timeout, this, &MainWindow::processMachiningStep);
-    machining_progress_timer_ = new QTimer(this);
-    machining_progress_timer_->setSingleShot(true);
-    connect(machining_progress_timer_, &QTimer::timeout, this, &MainWindow::updateMachiningProgressStep);
     machining_data_buffer_ = std::make_unique<nbcam::DataBuffer>();
     
     setupUI();
@@ -1379,9 +1375,6 @@ void MainWindow::resetMachiningProgress()
     machining_completed_segment_ids_.clear();
     emergency_stop_requested_ = false;
     machining_refresh_available_ = false;
-    machining_execution_clock_started_ = false;
-    machining_execution_start_time_ = std::chrono::steady_clock::time_point{};
-    machining_next_segment_to_mark_ = 0;
     applyHighlightedSegmentIds(QSet<int>{});
 }
 
@@ -1391,9 +1384,6 @@ void MainWindow::stopMachiningSession(bool reset_to_start,
 {
     if (machining_timer_) {
         machining_timer_->stop();
-    }
-    if (machining_progress_timer_) {
-        machining_progress_timer_->stop();
     }
 
     machining_run_state_ = MachiningRunState::Idle;
@@ -1474,7 +1464,6 @@ bool MainWindow::prepareMachiningPlan(QString* out_error)
 {
     machining_plan_.batches.clear();
     machining_plan_.all_segment_ids.clear();
-    machining_plan_.segment_end_times_us.clear();
 
     nbcam::LaserJob* const job = controller_ ? controller_->getCurrentJob() : nullptr;
     if (!job || !job->isValid()) {
@@ -1755,14 +1744,6 @@ bool MainWindow::prepareMachiningPlan(QString* out_error)
         return false;
     }
 
-    qint64 elapsed_us = 0;
-    for (const auto& batch : machining_plan_.batches) {
-        elapsed_us += static_cast<qint64>(std::max(1, batch.duration_us));
-        if (batch.segment_id >= 0) {
-            machining_plan_.segment_end_times_us.push_back({batch.segment_id, elapsed_us});
-        }
-    }
-
     int total_frames = 0;
     for (const auto& batch : machining_plan_.batches) {
         total_frames += batch.frame_count;
@@ -1867,44 +1848,6 @@ bool MainWindow::sendCurrentMachiningFrame(QString* out_error)
         }
         return false;
     }
-    return true;
-}
-
-bool MainWindow::sendMachiningPlanContinuous(QString* out_error)
-{
-    if (!ensureMachiningTransportConnected(out_error)) {
-        return false;
-    }
-    if (!machining_data_buffer_) {
-        if (out_error) {
-            *out_error = "双缓冲发送器未初始化。";
-        }
-        return false;
-    }
-
-    qint64 total_bytes = 0;
-    qint64 total_frames = 0;
-    for (const MachiningBatch& batch : machining_plan_.batches) {
-        if (emergency_stop_requested_ || machining_run_state_ != MachiningRunState::Running) {
-            if (out_error) {
-                *out_error = "加工已被用户中断。";
-            }
-            return false;
-        }
-        if (batch.payload.isEmpty()) {
-            continue;
-        }
-        machining_data_buffer_->appendBytes(batch.payload.constData(), static_cast<size_t>(batch.payload.size()));
-        total_bytes += batch.payload.size();
-        total_frames += batch.frame_count;
-        QCoreApplication::processEvents(QEventLoop::AllEvents, 1);
-    }
-    machining_data_buffer_->forceFill();
-
-    spdlog::info("Machining continuous send queued: batches={}, bytes={}, frames={}, segment_feedback=off",
-                 machining_plan_.batches.size(),
-                 total_bytes,
-                 total_frames);
     return true;
 }
 
@@ -2114,19 +2057,6 @@ void MainWindow::onStartMachining()
                  machining_plan_.batches.size(),
                  machining_plan_.all_segment_ids.size());
     updateMachiningUiState();
-    if (!is_simulation_mode_ && !machining_segment_feedback_enabled_) {
-        machining_execution_start_time_ = std::chrono::steady_clock::now();
-        machining_execution_clock_started_ = true;
-        machining_next_segment_to_mark_ = 0;
-        if (!sendMachiningPlanContinuous(&error)) {
-            stopMachiningSession(true, true, true);
-            QMessageBox::warning(this, "开始加工", error);
-            return;
-        }
-        updateMachiningProgressStep();
-        return;
-    }
-
     processMachiningStep();
 }
 
@@ -2274,10 +2204,6 @@ void MainWindow::processMachiningStep()
         return;
     }
 
-    if (!is_simulation_mode_ && !machining_segment_feedback_enabled_) {
-        return;
-    }
-
     QString error;
     if (!is_simulation_mode_ && !sendCurrentMachiningFrame(&error)) {
         stopMachiningSession(true, true, true);
@@ -2332,64 +2258,6 @@ void MainWindow::processMachiningStep()
         machining_timer_->start(next_interval_ms);
     }
     updateMachiningUiState();
-}
-
-void MainWindow::updateMachiningProgressStep()
-{
-    if (machining_run_state_ != MachiningRunState::Running) {
-        return;
-    }
-    if (!machining_execution_clock_started_) {
-        machining_execution_start_time_ = std::chrono::steady_clock::now();
-        machining_execution_clock_started_ = true;
-    }
-
-    const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::steady_clock::now() - machining_execution_start_time_).count();
-    while (machining_next_segment_to_mark_ < machining_plan_.segment_end_times_us.size() &&
-           elapsed_us >= machining_plan_.segment_end_times_us[machining_next_segment_to_mark_].second) {
-        const int segment_id = machining_plan_.segment_end_times_us[machining_next_segment_to_mark_].first;
-        machining_completed_segment_ids_.insert(segment_id);
-        applyMachiningProgressHighlight(segment_id);
-        ++machining_next_segment_to_mark_;
-    }
-
-    if (machining_next_segment_to_mark_ < machining_plan_.segment_end_times_us.size()) {
-        const qint64 next_elapsed_us = machining_plan_.segment_end_times_us[machining_next_segment_to_mark_].second;
-        const qint64 wait_us = std::max<qint64>(1000, next_elapsed_us - elapsed_us);
-        if (machining_progress_timer_) {
-            machining_progress_timer_->start(static_cast<int>(std::min<qint64>(wait_us / 1000, 1000)));
-        }
-        return;
-    }
-
-    if (!is_simulation_mode_ && !machining_segment_feedback_enabled_) {
-        if (machining_data_buffer_ &&
-            !machining_data_buffer_->waitUntilIdle(std::chrono::milliseconds(std::max(5000, comm_config_.tcp_io_timeout_ms * 50)))) {
-            const QString feedback = QString::fromStdString(machining_data_buffer_->getLastTransportFeedback());
-            const QString state = QString::fromStdString(machining_data_buffer_->describeState());
-            const QString reason = QString("加工数据已全部写入本地缓冲，但发送线程未在最终等待时间内排空。状态=%1%2")
-                                       .arg(state)
-                                       .arg(feedback.isEmpty() ? QString() : QString("，反馈=%1").arg(feedback));
-            stopMachiningSession(true, true, true);
-            spdlog::error("Machining failed while draining queued batches: {}", reason.toStdString());
-            QMessageBox::warning(this, "加工失败", reason);
-            return;
-        }
-    }
-
-    stopMachiningSession(false, true, true);
-    int total_frames = 0;
-    for (const auto& batch : machining_plan_.batches) {
-        total_frames += batch.frame_count;
-    }
-    spdlog::info("Machining finished: mode={}, segment_feedback={}, total_batches={}, total_frames={}, completed_segments={}",
-                 is_simulation_mode_ ? "simulate" : "live",
-                 machining_segment_feedback_enabled_ ? "on" : "off",
-                 machining_plan_.batches.size(),
-                 total_frames,
-                 machining_completed_segment_ids_.size());
-    statusBar()->showMessage(is_simulation_mode_ ? "模拟加工完成" : "加工数据帧下发完成", 5000);
 }
 
 void MainWindow::createLanguageMenu()
