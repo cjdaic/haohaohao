@@ -10,6 +10,7 @@
 #include <QStringList>
 #include <map>
 #include <memory>
+#include <chrono>
 #include <vector>
 #include <spdlog/common.h>
 
@@ -198,6 +199,8 @@ private:
     bool validateTcpTargetForMachining(QString* out_error) const;
     bool ensureMachiningTransportConnected(QString* out_error);
     bool sendCurrentMachiningFrame(QString* out_error);
+    bool sendMachiningPlanContinuous(QString* out_error);
+    void updateMachiningProgressStep();
     void updateMachiningUiState();
 
     // UI组件
@@ -266,6 +269,7 @@ private:
     QToolButton* machining_refresh_button_;
     QToolButton* machining_simulate_button_;
     QTimer* machining_timer_;
+    QTimer* machining_progress_timer_;
     std::unique_ptr<nbcam::DataBuffer> machining_data_buffer_;
 
     enum class ExecutorBackend {
@@ -289,6 +293,7 @@ private:
     struct MachiningPlan {
         QVector<MachiningBatch> batches;
         QSet<int> all_segment_ids;
+        QVector<QPair<int, qint64>> segment_end_times_us;
     };
 
     enum class MachiningRunState {
@@ -364,6 +369,9 @@ private:
     bool machining_segment_feedback_enabled_ = true;
     spdlog::level::level_enum machining_previous_log_level_ = spdlog::level::info;
     bool machining_log_level_overridden_ = false;
+    std::chrono::steady_clock::time_point machining_execution_start_time_{};
+    bool machining_execution_clock_started_ = false;
+    size_t machining_next_segment_to_mark_ = 0;
 
 protected:
     void showEvent(QShowEvent *event) override;
