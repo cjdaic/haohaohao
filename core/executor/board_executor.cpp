@@ -43,6 +43,46 @@ double resolveSpeedMmS(const ProcessParams* params, double fallback_mm_s)
     return 300.0;
 }
 
+int computeInterpolationSamples(uint16_t start_x,
+                                uint16_t start_y,
+                                uint16_t start_z,
+                                uint16_t end_x,
+                                uint16_t end_y,
+                                uint16_t end_z,
+                                double speed_mm_s)
+{
+    const double safe_speed_mm_s = (std::max)(1e-6, speed_mm_s);
+    const double speed_mm_per_s = safe_speed_mm_s;
+    constexpr double kTickSec = 0.00001;
+
+    const double dx = static_cast<double>(static_cast<int>(end_x) - static_cast<int>(start_x));
+    const double dy = static_cast<double>(static_cast<int>(end_y) - static_cast<int>(start_y));
+    const double dz = static_cast<double>(static_cast<int>(end_z) - static_cast<int>(start_z));
+
+    double length_xy = 0.001 * std::sqrt(dx * dx + dy * dy);
+    const double length_z = std::abs(0.001 * dz);
+    int n_max = 1;
+
+    if (length_xy > 1e-12) {
+        n_max = static_cast<int>((length_xy / (speed_mm_per_s * kTickSec)) + 1.0);
+    } else if (length_z > 1e-12) {
+        n_max = static_cast<int>((length_z / (speed_mm_per_s * kTickSec)) + 1.0);
+    }
+
+    return (std::max)(1, n_max);
+}
+
+uint16_t interpolateAxis(uint16_t a, uint16_t b, int sample_index, int sample_count)
+{
+    if (sample_count <= 0) {
+        return b;
+    }
+    const double ratio = static_cast<double>(sample_index) / static_cast<double>(sample_count);
+    const double raw = std::round(static_cast<double>(a) +
+                                  (static_cast<double>(b) - static_cast<double>(a)) * ratio);
+    return static_cast<uint16_t>(std::clamp(raw, 0.0, 65535.0));
+}
+
 }  // namespace
 
 BoardExecutor::BoardExecutor()
@@ -284,11 +324,15 @@ void BoardExecutor::simulateDryRunExecution(const LaserJob& job) const
 
     for (size_t segment_index = 0; segment_index < job.segments.size(); ++segment_index) {
         const auto& segment = job.segments[segment_index];
+        const ProcessParams* default_params = segment.params_override ? segment.params_override.get()
+                                                                     : &job.process_defaults;
 
         if (progress_callback_) {
             progress_callback_(segment.id);
         }
 
+        EncodedPoint prev_encoded{};
+        bool has_prev = false;
         for (size_t point_index = 0; point_index < segment.points.size(); ++point_index) {
             const auto& point = segment.points[point_index];
             EncodedPoint current_encoded;
@@ -296,7 +340,24 @@ void BoardExecutor::simulateDryRunExecution(const LaserJob& job) const
             if (!encodePointForMachine(job, point, segment_index, point_index, &current_encoded, &error, nullptr)) {
                 throw std::runtime_error(error);
             }
-            ++simulated_samples;
+
+            if (has_prev) {
+                const ProcessParams* point_params = point.params_override ? point.params_override.get() : default_params;
+                const bool point_is_jump = (segment.type == SegmentType::JUMP) || (point.laser == 0);
+                const double speed_mm_s = point_is_jump
+                    ? (std::max)(1.0, static_cast<double>(machine_config_.delay.jump_speed_mm_s))
+                    : resolveSpeedMmS(point_params, default_params->speed_mm_s);
+                simulated_samples += static_cast<size_t>(computeInterpolationSamples(prev_encoded.x,
+                                                                                     prev_encoded.y,
+                                                                                     prev_encoded.z,
+                                                                                     current_encoded.x,
+                                                                                     current_encoded.y,
+                                                                                     current_encoded.z,
+                                                                                     speed_mm_s));
+            }
+
+            prev_encoded = current_encoded;
+            has_prev = true;
         }
     }
 
@@ -376,6 +437,13 @@ void BoardExecutor::convertSegmentToBuffer(const LaserJob& job,
 
     applyProcessOverrides(&default_params);
 
+    const int fallback_laser_on_delay_us = machine_config_.delay.laser_on_delay_us;
+    const int fallback_laser_off_delay_us = machine_config_.delay.laser_off_delay_us;
+
+    EncodedPoint prev_encoded{};
+    bool has_prev = false;
+    int mark_elapsed_us = 0;
+
     for (size_t point_index = 0; point_index < segment.points.size(); ++point_index) {
         const auto& point = segment.points[point_index];
         const ProcessParams* point_params = point.params_override ? point.params_override.get() : &default_params;
@@ -388,18 +456,104 @@ void BoardExecutor::convertSegmentToBuffer(const LaserJob& job,
         }
 
         const bool point_is_jump = (segment.type == SegmentType::JUMP) || (point.laser == 0);
-        if (point_is_jump || machine_config_.mask_laser_output) {
+        const int laser_on_delay_us = resolveLaserOnDelayUs(point_params, fallback_laser_on_delay_us);
+
+        if (!has_prev) {
             data_buffer_->addProcessJumpData(current_encoded.x,
                                              current_encoded.y,
                                              current_encoded.z,
                                              current_encoded.a,
                                              current_encoded.b);
+            prev_encoded = current_encoded;
+            has_prev = true;
+            mark_elapsed_us = 0;
+            continue;
+        }
+
+        if (point_is_jump) {
+            const double jump_speed = (std::max)(1.0, static_cast<double>(machine_config_.delay.jump_speed_mm_s));
+            appendInterpolatedLine(prev_encoded, current_encoded, jump_speed, false, 0, nullptr);
         } else {
-            data_buffer_->addProcessData(current_encoded.x,
-                                         current_encoded.y,
-                                         current_encoded.z,
-                                         current_encoded.a,
-                                         current_encoded.b);
+            const double mark_speed = resolveSpeedMmS(point_params, default_params.speed_mm_s);
+            appendInterpolatedLine(prev_encoded,
+                                   current_encoded,
+                                   mark_speed,
+                                   true,
+                                   laser_on_delay_us,
+                                   &mark_elapsed_us);
+        }
+
+        prev_encoded = current_encoded;
+    }
+
+    if (!has_prev) {
+        return;
+    }
+
+    if (segment.type == SegmentType::JUMP) {
+        appendDelayAtPoint(prev_encoded, machine_config_.delay.jump_delay_us, 0);
+    } else {
+        const ProcessParams* tail_params =
+            segment.points.back().params_override ? segment.points.back().params_override.get() : &default_params;
+        const int laser_off_delay_us = resolveLaserOffDelayUs(tail_params, fallback_laser_off_delay_us);
+        appendDelayAtPoint(prev_encoded, machine_config_.delay.mark_delay_us, laser_off_delay_us);
+    }
+}
+
+void BoardExecutor::appendInterpolatedLine(const EncodedPoint& start,
+                                           const EncodedPoint& end,
+                                           double speed_mm_s,
+                                           bool mark_segment,
+                                           int laser_on_delay_us,
+                                           int* mark_elapsed_us)
+{
+    const int sample_count = computeInterpolationSamples(start.x,
+                                                         start.y,
+                                                         start.z,
+                                                         end.x,
+                                                         end.y,
+                                                         end.z,
+                                                         speed_mm_s);
+    int local_mark_elapsed_us = mark_elapsed_us ? *mark_elapsed_us : 0;
+
+    for (int i = 1; i <= sample_count; ++i) {
+        const EncodedPoint p{
+            interpolateAxis(start.x, end.x, i, sample_count),
+            interpolateAxis(start.y, end.y, i, sample_count),
+            interpolateAxis(start.z, end.z, i, sample_count),
+            interpolateAxis(start.a, end.a, i, sample_count),
+            interpolateAxis(start.b, end.b, i, sample_count),
+        };
+
+        if (mark_segment) {
+            if (machine_config_.mask_laser_output || local_mark_elapsed_us < laser_on_delay_us) {
+                data_buffer_->addProcessJumpData(p.x, p.y, p.z, p.a, p.b);
+            } else {
+                data_buffer_->addProcessData(p.x, p.y, p.z, p.a, p.b);
+            }
+            local_mark_elapsed_us += kDelayTickUs;
+        } else {
+            data_buffer_->addProcessJumpData(p.x, p.y, p.z, p.a, p.b);
+        }
+    }
+
+    if (mark_elapsed_us) {
+        *mark_elapsed_us = local_mark_elapsed_us;
+    }
+}
+
+void BoardExecutor::appendDelayAtPoint(const EncodedPoint& point, int delay_us, int delay_on_us)
+{
+    const int safe_delay_us = clampNonNegative(delay_us);
+    const int safe_delay_on_us = clampNonNegative(delay_on_us);
+    const int total_ticks = safe_delay_us / kDelayTickUs;
+    const int mark_ticks = (std::min)(total_ticks, safe_delay_on_us / kDelayTickUs);
+
+    for (int i = 0; i < total_ticks; ++i) {
+        if (!machine_config_.mask_laser_output && i < mark_ticks) {
+            data_buffer_->addProcessData(point.x, point.y, point.z, point.a, point.b);
+        } else {
+            data_buffer_->addProcessJumpData(point.x, point.y, point.z, point.a, point.b);
         }
     }
 }

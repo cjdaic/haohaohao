@@ -58,7 +58,6 @@ void TcpSocket::socketThread(DataBuffer* buffer,
     
     int sockfd = -1;
     char readData[128];
-    bool board_ready_for_buffer = false;
     
     while (running && running->load()) {
         try {
@@ -81,27 +80,10 @@ void TcpSocket::socketThread(DataBuffer* buffer,
                 if (connected) {
                     connected->store(true);
                 }
-                board_ready_for_buffer = false;
                 updateLastFeedback("connected");
             }
 
             if (buffer->hasPendingReadBuf()) {
-                int bytesRead = 0;
-                if (!board_ready_for_buffer) {
-                    bytesRead = recv(sockfd, readData, sizeof(readData), 0);
-                    if (bytesRead == SOCKET_ERROR) {
-                        const int recv_error = WSAGetLastError();
-                        if (recv_error == WSAETIMEDOUT || recv_error == WSAEWOULDBLOCK) {
-                            continue;
-                        }
-                        throw std::runtime_error("接收失败, code=" + std::to_string(recv_error));
-                    }
-                    if (bytesRead == 0) {
-                        throw std::runtime_error("板卡关闭连接");
-                    }
-                    board_ready_for_buffer = true;
-                }
-
                 int rd_ptr = 0;
                 if (!buffer->tryGetReadBuf(&rd_ptr)) {
                     continue;
@@ -114,56 +96,56 @@ void TcpSocket::socketThread(DataBuffer* buffer,
                     continue;
                 }
 
-                buffer->markSendBegin();
-                bool send_completed = false;
-                try {
-                    int totalSent = 0;
-                    while (totalSent < static_cast<int>(buf_len)) {
-                        const int bytesSent = send(sockfd,
-                                                   reinterpret_cast<const char*>(buf.data()) + totalSent,
-                                                   static_cast<int>(buf_len) - totalSent,
-                                                   0);
-                        if (bytesSent == SOCKET_ERROR) {
-                            throw std::runtime_error("发送失败, code=" + std::to_string(WSAGetLastError()));
-                        }
-                        if (bytesSent == 0) {
-                            throw std::runtime_error("发送返回0字节");
-                        }
-                        totalSent += bytesSent;
-                    }
+                int bytesRead = recvAvailable(sockfd, readData, sizeof(readData));
+                std::string recv_feedback;
+                if (bytesRead > 0) {
+                    recv_feedback = "pre recv " + std::to_string(bytesRead) + " bytes";
+                    updateLastFeedback(recv_feedback);
+                } else if (bytesRead == 0) {
+                    recv_feedback = "pre recv none";
+                    updateLastFeedback(recv_feedback + ", sending queued data");
+                } else {
+                    throw std::runtime_error("接收失败, code=" + std::to_string(WSAGetLastError()));
+                }
 
-                    updateLastFeedback("board ready, sent " + std::to_string(totalSent) + " bytes");
-                    board_ready_for_buffer = false;
-                    send_completed = true;
-                } catch (...) {
-                    buffer->markSendEnd();
-                    buffer->readEnd(rd_ptr);
-                    throw;
+                int totalSent = 0;
+                while (totalSent < static_cast<int>(buf_len)) {
+                    const int bytesSent = send(sockfd,
+                                               reinterpret_cast<const char*>(buf.data()) + totalSent,
+                                               static_cast<int>(buf_len) - totalSent,
+                                               0);
+                    if (bytesSent == SOCKET_ERROR) {
+                        throw std::runtime_error("发送失败, code=" + std::to_string(WSAGetLastError()));
+                    }
+                    if (bytesSent == 0) {
+                        throw std::runtime_error("发送返回0字节");
+                    }
+                    totalSent += bytesSent;
                 }
-                buffer->markSendEnd();
+
+                bytesRead = recvAvailable(sockfd, readData, sizeof(readData));
+                if (bytesRead > 0) {
+                    updateLastFeedback(recv_feedback + ", sent " + std::to_string(totalSent) +
+                                       " bytes, post recv " + std::to_string(bytesRead) + " bytes");
+                } else if (bytesRead == 0) {
+                    updateLastFeedback(recv_feedback + ", sent " + std::to_string(totalSent) +
+                                       " bytes, post recv none");
+                } else {
+                    throw std::runtime_error("接收失败, code=" + std::to_string(WSAGetLastError()));
+                }
                 buffer->readEnd(rd_ptr);
-                if (!send_completed) {
-                    continue;
-                }
                 continue;
             }
 
-            // 无待发送缓冲时只探测一次板卡请求，并保留这个请求给下一块数据使用。
-            if (!board_ready_for_buffer) {
-                int bytesRead = recvAvailable(sockfd, readData, sizeof(readData));
-                if (bytesRead == SOCKET_ERROR) {
-                    const int recv_error = WSAGetLastError();
-                    if (recv_error == WSAETIMEDOUT || recv_error == WSAEWOULDBLOCK) {
-                        continue;
-                    }
-                    throw std::runtime_error("接收失败, code=" + std::to_string(recv_error));
-                }
-                if (bytesRead > 0) {
-                    board_ready_for_buffer = true;
-                    updateLastFeedback("board ready");
-                }
+            // 空闲时只轮询板卡反馈，不能阻塞发送主循环。
+            int bytesRead = recvAvailable(sockfd, readData, sizeof(readData));
+            if (bytesRead > 0) {
+                updateLastFeedback("recv " + std::to_string(bytesRead) + " bytes");
+            } else if (bytesRead < 0) {
+                throw std::runtime_error("接收失败, code=" + std::to_string(WSAGetLastError()));
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
             
         } catch (const std::exception& e) {
             spdlog::error("TCP通信错误: {}", e.what());
@@ -172,7 +154,6 @@ void TcpSocket::socketThread(DataBuffer* buffer,
                 closesocket(sockfd);
                 sockfd = -1;
             }
-            board_ready_for_buffer = false;
             if (connected) {
                 connected->store(false);
             }

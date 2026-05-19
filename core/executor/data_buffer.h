@@ -63,11 +63,6 @@ public:
     size_t getBufferLength(int index) const {
         return (index >= 0 && index < static_cast<int>(buffer_lengths_.size())) ? buffer_lengths_[index] : 0;
     }
-    size_t currentWriteOffset() const {
-        return ptr_ > 0 ? static_cast<size_t>(ptr_) : 0;
-    }
-    size_t availableWriteBufferCount();
-    bool hasSpareWriteBuffer();
 
     // 追加原始字节数据
     void appendBytes(const void* data, size_t size);
@@ -95,7 +90,6 @@ private:
     std::mutex rd_mutex_;
     std::condition_variable wr_cv_;
     std::condition_variable rd_cv_;
-    std::atomic<int> in_flight_buffers_{0};
     
     int wr_ptr_ = 0;
     int ptr_ = 0;
@@ -111,10 +105,6 @@ private:
     
     void handleBufferFilled();
     void handleBegin();
-    void markSendBegin();
-    void markSendEnd();
-
-    friend class TcpSocket;
     
     // 功率转换函数（从C#移植）
     double powerToValue(double power) const;

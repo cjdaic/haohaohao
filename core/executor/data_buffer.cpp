@@ -94,10 +94,13 @@ void DataBuffer::forceFill() {
     if (ptr_ <= 0) {
         return;
     }
+    const size_t payload_length = static_cast<size_t>(ptr_);
+    buffer_lengths_[wr_ptr_] = payload_length;
     while (ptr_ < DATA_BUF_SIZE) {
-        databuf_[wr_ptr_][ptr_++] = 0;
+        databuf_[wr_ptr_][ptr_] = 0;
+        ptr_++;
     }
-    buffer_lengths_[wr_ptr_] = static_cast<size_t>(DATA_BUF_SIZE);
+    buffer_lengths_[wr_ptr_] = payload_length;
     handleBufferFilled();
 }
 
@@ -119,6 +122,7 @@ void DataBuffer::appendBytes(const void* data, size_t size)
         ptr_ += static_cast<int>(writable);
         src += writable;
         remaining -= writable;
+        buffer_lengths_[wr_ptr_] = static_cast<size_t>(ptr_);
 
         if (ptr_ >= DATA_BUF_SIZE) {
             handleBufferFilled();
@@ -172,17 +176,6 @@ bool DataBuffer::hasPendingReadBuf()
 {
     std::lock_guard<std::mutex> lock(rd_mutex_);
     return !rd_queue_.empty();
-}
-
-size_t DataBuffer::availableWriteBufferCount()
-{
-    std::lock_guard<std::mutex> lock(wr_mutex_);
-    return wr_queue_.size();
-}
-
-bool DataBuffer::hasSpareWriteBuffer()
-{
-    return availableWriteBufferCount() > 0;
 }
 
 void DataBuffer::readEnd(int buf_index) {
@@ -254,9 +247,7 @@ bool DataBuffer::waitUntilIdle(std::chrono::milliseconds timeout)
             write_queue_size = wr_queue_.size();
         }
 
-        if (read_queue_empty &&
-            write_queue_size >= static_cast<size_t>(DATA_BUF_NUM - 1) &&
-            in_flight_buffers_.load() == 0) {
+        if (read_queue_empty && write_queue_size >= static_cast<size_t>(DATA_BUF_NUM - 1)) {
             return true;
         }
 
@@ -288,7 +279,6 @@ std::string DataBuffer::describeState()
            ", connected=" + std::string(connected ? "true" : "false") +
            ", read_queue=" + std::to_string(read_queue_size) +
            ", write_queue=" + std::to_string(write_queue_size) +
-           ", in_flight=" + std::to_string(in_flight_buffers_.load()) +
            ", ptr=" + std::to_string(ptr_);
 }
 
@@ -301,35 +291,20 @@ void DataBuffer::onTcpThreadExited()
 {
     tcp_thread_running_.store(false);
     tcp_connected_.store(false);
-    in_flight_buffers_.store(0);
     wr_cv_.notify_all();
     rd_cv_.notify_all();
 }
 
-void DataBuffer::markSendBegin()
-{
-    in_flight_buffers_.fetch_add(1);
-}
-
-void DataBuffer::markSendEnd()
-{
-    const int old_value = in_flight_buffers_.fetch_sub(1);
-    if (old_value <= 0) {
-        in_flight_buffers_.store(0);
-    }
-}
-
 void DataBuffer::handleBufferFilled() {
-    if (ptr_ > 0 && (ptr_ >= DATA_BUF_SIZE || buffer_lengths_[wr_ptr_] > 0)) {
-        const size_t effective_length = buffer_lengths_[wr_ptr_] > 0
-            ? buffer_lengths_[wr_ptr_]
-            : static_cast<size_t>(ptr_);
+    if (ptr_ >= DATA_BUF_SIZE) {
+        if (buffer_lengths_[wr_ptr_] == 0) {
+            buffer_lengths_[wr_ptr_] = static_cast<size_t>(ptr_);
+        }
         if (!tcp_thread_running_.load()) {
             spdlog::info("启动TCP线程");
             startTcpThread();
         }
-        buffer_lengths_[wr_ptr_] = effective_length;
-        spdlog::info("写入成功，缓冲区: {}, 有效字节: {}", wr_ptr_, effective_length);
+        spdlog::info("写入成功，缓冲区: {}, 有效字节: {}", wr_ptr_, buffer_lengths_[wr_ptr_]);
         writeEnd(wr_ptr_);
         int next_wr_ptr = 0;
         if (!getWriteBuf(&next_wr_ptr)) {

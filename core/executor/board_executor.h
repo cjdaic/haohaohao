@@ -104,6 +104,13 @@ private:
                                size_t segment_index,
                                int* io_active_freq_hz,
                                double* io_active_power_w);
+    void appendInterpolatedLine(const EncodedPoint& start,
+                                const EncodedPoint& end,
+                                double speed_mm_s,
+                                bool mark_segment,
+                                int laser_on_delay_us,
+                                int* mark_elapsed_us);
+    void appendDelayAtPoint(const EncodedPoint& point, int delay_us, int delay_on_us);
     static int resolveLaserOnDelayUs(const ProcessParams* params, int fallback_us);
     static int resolveLaserOffDelayUs(const ProcessParams* params, int fallback_us);
     

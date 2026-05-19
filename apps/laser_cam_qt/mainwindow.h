@@ -7,9 +7,7 @@
 #include <QSplitter>
 #include <QShowEvent>
 #include <QSet>
-#include <chrono>
 #include <QStringList>
-#include <utility>
 #include <map>
 #include <memory>
 #include <vector>
@@ -199,7 +197,6 @@ private:
     void refreshModelProcessingRegionStatus();
     bool validateTcpTargetForMachining(QString* out_error) const;
     bool ensureMachiningTransportConnected(QString* out_error);
-    bool sendMachiningPlanContinuous(QString* out_error);
     bool sendCurrentMachiningFrame(QString* out_error);
     void updateMachiningUiState();
 
@@ -281,11 +278,17 @@ private:
         FiveAxis,
     };
 
+    struct MachiningBatch {
+        QByteArray payload;
+        int segment_id = -1;
+        int duration_us = 0;
+        bool mark_output = false;
+        int frame_count = 0;
+    };
+
     struct MachiningPlan {
+        QVector<MachiningBatch> batches;
         QSet<int> all_segment_ids;
-        std::vector<std::pair<int, qint64>> segment_end_frames;
-        qint64 planned_frames = 0;
-        qint64 transport_frames = 0;
     };
 
     enum class MachiningRunState {
@@ -352,7 +355,6 @@ private:
     MachiningPlan machining_plan_;
     MachiningRunState machining_run_state_ = MachiningRunState::Idle;
     int machining_batch_index_ = 0;
-    int machining_batch_byte_offset_ = 0;
     QSet<int> machining_completed_segment_ids_;
     bool emergency_stop_requested_ = false;
     bool machining_refresh_available_ = false;
@@ -362,8 +364,6 @@ private:
     bool machining_segment_feedback_enabled_ = true;
     spdlog::level::level_enum machining_previous_log_level_ = spdlog::level::info;
     bool machining_log_level_overridden_ = false;
-    std::chrono::steady_clock::time_point machining_execution_start_time_{};
-    bool machining_execution_clock_started_ = false;
 
 protected:
     void showEvent(QShowEvent *event) override;
