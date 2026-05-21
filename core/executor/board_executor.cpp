@@ -123,6 +123,13 @@ void BoardExecutor::setMachineConfig(const MachineConfig& config)
     }
 }
 
+void BoardExecutor::applyAxisSwapIfNeeded(double& y, double& z) const
+{
+    if (machine_config_.swap_yz_axes) {
+        std::swap(y, z);
+    }
+}
+
 bool BoardExecutor::initialize()
 {
     try {
@@ -606,6 +613,7 @@ bool BoardExecutor::encodePointForMachine(const LaserJob& job,
         used_job_transform = true;
     }
 
+    applyAxisSwapIfNeeded(y, z);
     x += machine_config_.x_axis.offset_mm;
     y += machine_config_.y_axis.offset_mm;
     z += machine_config_.z_axis.offset_mm;
@@ -620,15 +628,17 @@ bool BoardExecutor::encodePointForMachine(const LaserJob& job,
         }
         return false;
     }
-    if (!encodeAxis(y, machine_config_.y_axis, "Y", &encoded_point.y, &axis_error)) {
+    const char* logical_y_name = machine_config_.swap_yz_axes ? "Z" : "Y";
+    const char* logical_z_name = machine_config_.swap_yz_axes ? "Y" : "Z";
+    if (!encodeAxis(y, machine_config_.y_axis, logical_y_name, &encoded_point.y, &axis_error)) {
         if (out_error) {
-            *out_error = buildPointContext(segment_index, point_index, "Y") + ": " + axis_error;
+            *out_error = buildPointContext(segment_index, point_index, logical_y_name) + ": " + axis_error;
         }
         return false;
     }
-    if (!encodeAxis(z, machine_config_.z_axis, "Z", &encoded_point.z, &axis_error)) {
+    if (!encodeAxis(z, machine_config_.z_axis, logical_z_name, &encoded_point.z, &axis_error)) {
         if (out_error) {
-            *out_error = buildPointContext(segment_index, point_index, "Z") + ": " + axis_error;
+            *out_error = buildPointContext(segment_index, point_index, logical_z_name) + ": " + axis_error;
         }
         return false;
     }

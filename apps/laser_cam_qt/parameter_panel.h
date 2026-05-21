@@ -29,6 +29,8 @@ public:
     QString getContourProcessMode() const;
     bool isContourEnabled() const;
     bool isZLayerEnabled() const;
+    bool isLaserOutputEnabled() const;
+    void setLaserOutputEnabled(bool enabled);
     double getLayerHeight() const;  // 返回mm
 
 signals:
@@ -82,6 +84,7 @@ private:
     QComboBox* strategy_combo_;
     QComboBox* direction_combo_;
     QComboBox* contour_mode_combo_;
+    QCheckBox* laser_output_check_;
     QPushButton* replan_button_;
     
     // 单位选择下拉框

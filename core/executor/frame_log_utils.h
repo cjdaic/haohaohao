@@ -11,7 +11,9 @@ namespace nbcam {
 bool exportJobFramesForDemo(const LaserJob& job,
                             const std::string& log_dir,
                             std::string* out_log_path,
-                            std::array<uint16_t, 8>* out_first_data_frame);
+                            std::array<uint16_t, 8>* out_first_data_frame,
+                            bool swap_yz_axes = false,
+                            bool laser_output_enabled = false);
 
 // gRPC + TCP 单帧发送示例（gRPC层采用请求/响应日志模拟，数据面走TCP发16字节帧）。
 // 无论发送成功与否，都会写入时间戳日志。
@@ -48,6 +50,8 @@ bool exportConnectionFrameLog(const LaserJob& job,
                               bool serial_enabled,
                               bool serial_ok,
                               const std::string& serial_feedback,
-                              std::string* out_log_path);
+                              std::string* out_log_path,
+                              bool swap_yz_axes = false,
+                              bool laser_output_enabled = false);
 
 }  // namespace nbcam

@@ -442,6 +442,13 @@ bool Rtc6Executor::validateJob(const LaserJob& job,
     return true;
 }
 
+void Rtc6Executor::applyAxisSwapIfNeeded(double& y, double& z) const
+{
+    if (machine_config_.swap_yz_axes) {
+        std::swap(y, z);
+    }
+}
+
 bool Rtc6Executor::encodePointForRtc(const LaserJob& job,
                                      const PathPoint& point,
                                      size_t segment_index,
@@ -472,26 +479,29 @@ bool Rtc6Executor::encodePointForRtc(const LaserJob& job,
         used_job_transform = true;
     }
 
+    applyAxisSwapIfNeeded(y, z);
     x += machine_config_.x_axis.offset_mm;
     y += machine_config_.y_axis.offset_mm;
     z += machine_config_.z_axis.offset_mm;
 
     std::string axis_error;
+    const char* logical_y_name = machine_config_.swap_yz_axes ? "Z" : "Y";
+    const char* logical_z_name = machine_config_.swap_yz_axes ? "Y" : "Z";
     if (!checkAxisRange(x, machine_config_.x_axis, "X", &axis_error)) {
         if (out_error) {
             *out_error = buildPointContext(segment_index, point_index, "X") + ": " + axis_error;
         }
         return false;
     }
-    if (!checkAxisRange(y, machine_config_.y_axis, "Y", &axis_error)) {
+    if (!checkAxisRange(y, machine_config_.y_axis, logical_y_name, &axis_error)) {
         if (out_error) {
-            *out_error = buildPointContext(segment_index, point_index, "Y") + ": " + axis_error;
+            *out_error = buildPointContext(segment_index, point_index, logical_y_name) + ": " + axis_error;
         }
         return false;
     }
-    if (!checkAxisRange(z, machine_config_.z_axis, "Z", &axis_error)) {
+    if (!checkAxisRange(z, machine_config_.z_axis, logical_z_name, &axis_error)) {
         if (out_error) {
-            *out_error = buildPointContext(segment_index, point_index, "Z") + ": " + axis_error;
+            *out_error = buildPointContext(segment_index, point_index, logical_z_name) + ": " + axis_error;
         }
         return false;
     }

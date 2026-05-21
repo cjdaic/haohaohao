@@ -133,6 +133,11 @@ void ParameterPanel::setupUI()
     contour_mode_combo_->addItem("加工全部", "all");
     contour_mode_combo_->setCurrentIndex(contour_mode_combo_->findData("all"));
     pattern_layout->addRow("加工轮廓:", contour_mode_combo_);
+
+    laser_output_check_ = new QCheckBox("开光", this);
+    laser_output_check_->setChecked(false);
+    laser_output_check_->setToolTip("控制真实下发与日志导出的开关光状态");
+    pattern_layout->addRow("激光输出:", laser_output_check_);
     
     main_layout->addWidget(pattern_group);
 
@@ -207,6 +212,18 @@ bool ParameterPanel::isContourEnabled() const
 bool ParameterPanel::isZLayerEnabled() const
 {
     return strategy_combo_ && strategy_combo_->currentText() == "Z轴分层填充";
+}
+
+bool ParameterPanel::isLaserOutputEnabled() const
+{
+    return laser_output_check_ && laser_output_check_->isChecked();
+}
+
+void ParameterPanel::setLaserOutputEnabled(bool enabled)
+{
+    if (laser_output_check_) {
+        laser_output_check_->setChecked(enabled);
+    }
 }
 
 double ParameterPanel::getLayerHeight() const

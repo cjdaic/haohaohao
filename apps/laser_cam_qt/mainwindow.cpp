@@ -27,6 +27,7 @@
 #include <QInputDialog>
 #include <QTimer>
 #include <QShowEvent>
+#include <QSize>
 #include <QSettings>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -221,9 +222,8 @@ QString bytesToHex(const QByteArray& data)
 }
 
 bool queryMachiningStartOptions(QWidget* parent,
-                                const QString& title,
-                                bool* out_laser_enabled,
-                                bool* out_segment_feedback_enabled)
+                                 const QString& title,
+                                 bool* out_laser_enabled)
 {
     QDialog dialog(parent);
     dialog.setWindowTitle(title);
@@ -245,16 +245,6 @@ bool queryMachiningStartOptions(QWidget* parent,
     laser_layout->addWidget(laser_hint);
     layout->addWidget(laser_group);
 
-    auto* feedback_group = new QGroupBox("发送反馈", &dialog);
-    auto* feedback_layout = new QVBoxLayout(feedback_group);
-    auto* segment_feedback_box = new QCheckBox("按段级反馈", feedback_group);
-    segment_feedback_box->setChecked(false);
-    feedback_layout->addWidget(segment_feedback_box);
-    auto* feedback_hint = new QLabel("勾选后按现有逐段等待流程发送；不勾选时仅输出 warning 及以上日志，数据连续下发，全部发送完成后再统一反馈加工结果。", feedback_group);
-    feedback_hint->setWordWrap(true);
-    feedback_layout->addWidget(feedback_hint);
-    layout->addWidget(feedback_group);
-
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
     QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
@@ -266,9 +256,6 @@ bool queryMachiningStartOptions(QWidget* parent,
 
     if (out_laser_enabled) {
         *out_laser_enabled = laser_button->isChecked();
-    }
-    if (out_segment_feedback_enabled) {
-        *out_segment_feedback_enabled = segment_feedback_box->isChecked();
     }
     return true;
 }
@@ -477,15 +464,20 @@ bool encodePointForMachining(const nbcam::LaserJob& job,
         }
     }
 
+    if (machine_config.swap_yz_axes) {
+        std::swap(y, z);
+    }
     x += machine_config.x_axis.offset_mm;
     y += machine_config.y_axis.offset_mm;
     z += machine_config.z_axis.offset_mm;
 
     MachineEncodedPoint encoded;
     QString axis_error;
+    const char* logical_y_name = machine_config.swap_yz_axes ? "Z" : "Y";
+    const char* logical_z_name = machine_config.swap_yz_axes ? "Y" : "Z";
     if (!encodeAxisMachining(x, machine_config.x_axis, "X", &encoded.x, &axis_error) ||
-        !encodeAxisMachining(y, machine_config.y_axis, "Y", &encoded.y, &axis_error) ||
-        !encodeAxisMachining(z, machine_config.z_axis, "Z", &encoded.z, &axis_error)) {
+        !encodeAxisMachining(y, machine_config.y_axis, logical_y_name, &encoded.y, &axis_error) ||
+        !encodeAxisMachining(z, machine_config.z_axis, logical_z_name, &encoded.z, &axis_error)) {
         if (out_error) {
             *out_error = QString("segment=%1, point=%2: %3")
                              .arg(static_cast<qulonglong>(segment_index))
@@ -809,6 +801,7 @@ MainWindow::MainWindow(QWidget *parent)
     , connection_menu_(nullptr)
     , device_board_menu_(nullptr)
     , manual_menu_(nullptr)
+    , calibration_menu_(nullptr)
     , measure_menu_(nullptr)
     , log_menu_(nullptr)
     , language_menu_(nullptr)
@@ -1158,7 +1151,12 @@ void MainWindow::createMenus()
     tools_menu_->addSeparator();
 
     QAction* validate_example_01_action = new QAction("验证示例流程(0.1mm)", this);
-    connect(validate_example_01_action, &QAction::triggered, this, [this]() { runValidationExample(0.1); });
+    connect(validate_example_01_action, &QAction::triggered, this, [this]() {
+        ValidationExampleOptions options;
+        options.force_laser_output = true;
+        options.force_swap_yz_axes = true;
+        runValidationExample(0.1, options);
+    });
     tools_menu_->addAction(validate_example_01_action);
 
     QAction* validate_example_02_action = new QAction("验证示例流程2(圆弧,HUST,0.01mm)", this);
@@ -1167,7 +1165,6 @@ void MainWindow::createMenus()
         options.svg_relative_path = "docs/HUST.svg";
         options.strategy_override = "轴向往返填充(圆弧)";
         options.adaptive_target_triangles = 0;
-        options.export_connection_frame_log = true;
         options.run_comm_probe_for_log = true;
         options.arc_center_x = 20.0;
         options.arc_center_z = -15.0;
@@ -1180,6 +1177,8 @@ void MainWindow::createMenus()
     connect(validate_example_03_action, &QAction::triggered, this, [this]() {
         ValidationExampleOptions options;
         options.svg_relative_path = "docs/HUST.svg";
+        options.force_laser_output = true;
+        options.force_swap_yz_axes = true;
         runValidationExample(0.01, options);
     });
     tools_menu_->addAction(validate_example_03_action);
@@ -1230,6 +1229,12 @@ void MainWindow::createMenus()
     QAction* open_manual_panel_action = new QAction("打开手动操作面板", this);
     connect(open_manual_panel_action, &QAction::triggered, this, &MainWindow::openManualOperationPanel);
     manual_menu_->addAction(open_manual_panel_action);
+
+    // 校正菜单
+    calibration_menu_ = menuBar()->addMenu("校正(&K)");
+    QAction* plane_square_grid_calibration_action = new QAction("加工平面3x3正方形校正...", this);
+    connect(plane_square_grid_calibration_action, &QAction::triggered, this, &MainWindow::openCalibrationDialog);
+    calibration_menu_->addAction(plane_square_grid_calibration_action);
 
     // 测量菜单
     measure_menu_ = menuBar()->addMenu("测量(&M)");
@@ -1372,6 +1377,7 @@ void MainWindow::applyMachiningProgressHighlight(int current_segment_id)
 void MainWindow::resetMachiningProgress()
 {
     machining_batch_index_ = 0;
+    machining_transport_pending_bytes_ = 0;
     machining_completed_segment_ids_.clear();
     emergency_stop_requested_ = false;
     machining_refresh_available_ = false;
@@ -1481,6 +1487,7 @@ bool MainWindow::prepareMachiningPlan(QString* out_error)
     machine_config.transport.max_connect_attempts = std::max(1, comm_config_.tcp_max_connect_attempts);
     machine_config.transport.io_timeout_ms = comm_config_.tcp_io_timeout_ms;
     machine_config.apply_job_transform = comm_config_.apply_job_transform;
+    machine_config.swap_yz_axes = comm_config_.swap_yz_axes;
     machine_config.dry_run_only = true;
     machine_config.live_laser_enabled = false;
     machine_config.axis_mode = (comm_config_.axis_mode == AxisMode::FiveAxis)
@@ -1834,10 +1841,14 @@ bool MainWindow::sendCurrentMachiningFrame(QString* out_error)
 
     const MachiningBatch& batch = machining_plan_.batches.at(machining_batch_index_);
     machining_data_buffer_->appendBytes(batch.payload.constData(), static_cast<size_t>(batch.payload.size()));
-    machining_data_buffer_->forceFill();
+    machining_transport_pending_bytes_ =
+        (machining_transport_pending_bytes_ + static_cast<size_t>(batch.payload.size())) %
+        static_cast<size_t>(nbcam::DataBuffer::DATA_BUF_SIZE);
     if (!machining_segment_feedback_enabled_) {
         return true;
     }
+    machining_data_buffer_->forceFill();
+    machining_transport_pending_bytes_ = 0;
     if (!machining_data_buffer_->waitUntilIdle(std::chrono::milliseconds(std::max(1000, comm_config_.tcp_io_timeout_ms * 10)))) {
         if (out_error) {
             const QString feedback = QString::fromStdString(machining_data_buffer_->getLastTransportFeedback());
@@ -1848,6 +1859,55 @@ bool MainWindow::sendCurrentMachiningFrame(QString* out_error)
         }
         return false;
     }
+    return true;
+}
+
+bool MainWindow::flushMachiningTransportTail(QString* out_error)
+{
+    if (is_simulation_mode_) {
+        return true;
+    }
+    if (!ensureMachiningTransportConnected(out_error)) {
+        return false;
+    }
+    if (!machining_data_buffer_) {
+        if (out_error) {
+            *out_error = "双缓冲发送器未初始化。";
+        }
+        return false;
+    }
+
+    const size_t block_size = static_cast<size_t>(nbcam::DataBuffer::DATA_BUF_SIZE);
+    if (machining_transport_pending_bytes_ > 0) {
+        const QByteArray end_frame = packFrameBytes(0, 0, 0, 0, 0, 0x1100, 0, 0);
+        size_t remaining = block_size - machining_transport_pending_bytes_;
+        while (remaining >= static_cast<size_t>(end_frame.size())) {
+            machining_data_buffer_->appendBytes(end_frame.constData(), static_cast<size_t>(end_frame.size()));
+            remaining -= static_cast<size_t>(end_frame.size());
+        }
+        if (remaining > 0) {
+            QByteArray padding(static_cast<int>(remaining), '\0');
+            machining_data_buffer_->appendBytes(padding.constData(), static_cast<size_t>(padding.size()));
+        }
+        machining_transport_pending_bytes_ = 0;
+    }
+
+    machining_data_buffer_->forceFill();
+    const auto timeout = std::chrono::milliseconds(std::max(5000, comm_config_.tcp_io_timeout_ms * 50));
+    if (!machining_data_buffer_->waitUntilIdle(timeout)) {
+        if (out_error) {
+            const QString feedback = QString::fromStdString(machining_data_buffer_->getLastTransportFeedback());
+            const QString state = QString::fromStdString(machining_data_buffer_->describeState());
+            *out_error = QString("加工数据已全部写入本地缓冲，但发送线程未在最终等待时间内排空。状态=%1%2")
+                             .arg(state)
+                             .arg(feedback.isEmpty() ? QString() : QString("，反馈=%1").arg(feedback));
+        }
+        return false;
+    }
+
+    spdlog::info("Machining transport tail flushed: state={}, feedback={}",
+                 machining_data_buffer_->describeState(),
+                 machining_data_buffer_->getLastTransportFeedback());
     return true;
 }
 
@@ -1888,6 +1948,7 @@ bool MainWindow::sendMachiningResetToStartFrame(QString* out_error)
     machine_config.transport.max_connect_attempts = std::max(1, comm_config_.tcp_max_connect_attempts);
     machine_config.transport.io_timeout_ms = comm_config_.tcp_io_timeout_ms;
     machine_config.apply_job_transform = comm_config_.apply_job_transform;
+    machine_config.swap_yz_axes = comm_config_.swap_yz_axes;
     machine_config.dry_run_only = true;
     machine_config.live_laser_enabled = false;
     machine_config.axis_mode = (comm_config_.axis_mode == AxisMode::FiveAxis)
@@ -2019,16 +2080,8 @@ void MainWindow::onStartMachining()
         return;
     }
 
-    bool laser_output_enabled = false;
-    bool segment_feedback_enabled = true;
-    if (!is_simulation_mode_) {
-        if (!queryMachiningStartOptions(this, "开始加工", &laser_output_enabled, &segment_feedback_enabled)) {
-            statusBar()->showMessage("已取消开始加工", 3000);
-            return;
-        }
-    }
-    machining_laser_output_enabled_ = laser_output_enabled;
-    machining_segment_feedback_enabled_ = segment_feedback_enabled;
+    machining_laser_output_enabled_ = parameter_panel_ && parameter_panel_->isLaserOutputEnabled();
+    machining_segment_feedback_enabled_ = false;
 
     stopMachiningSession(true, true, true);
     if (!prepareMachiningPlan(&error)) {
@@ -2044,7 +2097,7 @@ void MainWindow::onStartMachining()
     machining_run_state_ = MachiningRunState::Running;
     emergency_stop_requested_ = false;
     machining_refresh_available_ = false;
-    if (!is_simulation_mode_ && !machining_segment_feedback_enabled_) {
+    if (!is_simulation_mode_) {
         machining_previous_log_level_ = spdlog::get_level();
         machining_log_level_overridden_ = true;
         spdlog::set_level(spdlog::level::warn);
@@ -2168,26 +2221,12 @@ void MainWindow::processMachiningStep()
     }
 
     if (machining_batch_index_ >= machining_plan_.batches.size()) {
-        if (!is_simulation_mode_ && !machining_segment_feedback_enabled_) {
-            QString drain_error;
-            if (!ensureMachiningTransportConnected(&drain_error) ||
-                !machining_data_buffer_ ||
-                !machining_data_buffer_->waitUntilIdle(std::chrono::milliseconds(std::max(5000, comm_config_.tcp_io_timeout_ms * 50)))) {
-                stopMachiningSession(true, true, true);
-                const QString feedback = machining_data_buffer_
-                    ? QString::fromStdString(machining_data_buffer_->getLastTransportFeedback())
-                    : QString();
-                const QString reason = drain_error.isEmpty()
-                    ? QString("加工数据已全部写入本地缓冲，但发送线程未在最终等待时间内排空。%1")
-                          .arg(feedback.isEmpty() ? QString("状态=%1").arg(QString::fromStdString(machining_data_buffer_->describeState()))
-                                                  : QString("状态=%1，反馈=%2")
-                                                        .arg(QString::fromStdString(machining_data_buffer_->describeState()))
-                                                        .arg(feedback))
-                    : drain_error;
-                spdlog::error("Machining failed while draining queued batches: {}", reason.toStdString());
-                QMessageBox::warning(this, "加工失败", reason);
-                return;
-            }
+        QString flush_error;
+        if (!flushMachiningTransportTail(&flush_error)) {
+            stopMachiningSession(true, true, true);
+            spdlog::error("Machining failed while flushing transport tail: {}", flush_error.toStdString());
+            QMessageBox::warning(this, "加工失败", flush_error);
+            return;
         }
         stopMachiningSession(false, true, true);
         int total_frames = 0;
@@ -2623,7 +2662,7 @@ bool MainWindow::configureDeviceSettings()
     QDialog dialog(this);
     dialog.setWindowTitle("设备设置");
     dialog.setModal(true);
-    dialog.resize(420, 220);
+    dialog.resize(420, 260);
 
     auto* layout = new QVBoxLayout(&dialog);
 
@@ -2639,6 +2678,8 @@ bool MainWindow::configureDeviceSettings()
     const int axis_mode_data = (comm_config_.axis_mode == AxisMode::FiveAxis) ? 1 : 0;
     const int device_index = device_combo->findData(backend_data);
     const int axis_mode_index = axis_mode_combo->findData(axis_mode_data);
+    auto* swap_yz_check = new QCheckBox("交换y/z轴", device_group);
+    swap_yz_check->setChecked(comm_config_.swap_yz_axes);
     if (device_index >= 0) {
         device_combo->setCurrentIndex(device_index);
     }
@@ -2647,6 +2688,7 @@ bool MainWindow::configureDeviceSettings()
     }
     device_form->addRow("设备", device_combo);
     device_form->addRow("轴模式", axis_mode_combo);
+    device_form->addRow("", swap_yz_check);
     layout->addWidget(device_group);
 
     auto* hint_label = new QLabel("三轴模式下A/B轴保持中位值；五轴模式下数据帧携带A/B轴振镜偏摆/旋转数据。", &dialog);
@@ -2665,10 +2707,12 @@ bool MainWindow::configureDeviceSettings()
     const bool use_rtc6 = (device_combo->currentData().toInt() == 1);
     comm_config_.executor_backend = use_rtc6 ? ExecutorBackend::RTC6 : ExecutorBackend::DataGenerator;
     comm_config_.axis_mode = (axis_mode_combo->currentData().toInt() == 1) ? AxisMode::FiveAxis : AxisMode::ThreeAxis;
+    comm_config_.swap_yz_axes = swap_yz_check->isChecked();
 
-    spdlog::info("设备设置已更新: backend={}, axis_mode={}",
+    spdlog::info("设备设置已更新: backend={}, axis_mode={}, swap_yz_axes={}",
                  use_rtc6 ? "rtc6" : "datagenerator",
-                 comm_config_.axis_mode == AxisMode::FiveAxis ? "five_axis" : "three_axis");
+                 comm_config_.axis_mode == AxisMode::FiveAxis ? "five_axis" : "three_axis",
+                 comm_config_.swap_yz_axes);
     return true;
 }
 
@@ -3357,52 +3401,7 @@ void MainWindow::connectCommunication()
             spdlog::info("串口通信测试已跳过");
         }
 
-        nbcam::LaserJob* job = controller_ ? controller_->getCurrentJob() : nullptr;
-        if (!use_rtc6 && grpc_test_enabled && job && job->isValid()) {
-            QString log_dir = QDir::current().absoluteFilePath("log/test");
-            const QString cmake_path = resolveExampleFile("CMakeLists.txt");
-            if (!cmake_path.isEmpty()) {
-                log_dir = QDir(QFileInfo(cmake_path).absolutePath()).absoluteFilePath("log/test");
-            }
-            QDir().mkpath(log_dir);
-
-            std::array<uint16_t, 8> first_frame{};
-            std::string frame_map_log_path;
-            if (nbcam::exportJobFramesForDemo(*job, log_dir.toStdString(), &frame_map_log_path, &first_frame)) {
-                std::string concurrent_log_path;
-                bool grpc_send_ok = false;
-                bool tcp_send_ok = false;
-                std::string grpc_send_feedback;
-                std::string tcp_send_feedback;
-                const bool send_ok = nbcam::sendFrameGrpcTcpConcurrent(
-                    first_frame,
-                    log_dir.toStdString(),
-                    &concurrent_log_path,
-                    comm_config_.grpc_endpoint.toStdString(),
-                    comm_config_.tcp_host.toStdString(),
-                    static_cast<uint16_t>(comm_config_.tcp_port),
-                    kCommTimeoutMs,
-                    &grpc_send_ok,
-                    &grpc_send_feedback,
-                    &tcp_send_ok,
-                    &tcp_send_feedback);
-
-                captureGeneratedLog(frame_map_log_path);
-                captureGeneratedLog(concurrent_log_path);
-
-                grpc_ok = grpc_ok && grpc_send_ok;
-                tcp_ok = tcp_ok && tcp_send_ok;
-                if (!grpc_send_feedback.empty()) {
-                    grpc_feedback += QString(" | frame_send=%1").arg(QString::fromStdString(grpc_send_feedback));
-                }
-                if (!tcp_send_feedback.empty()) {
-                    tcp_feedback += QString(" | frame_send=%1").arg(QString::fromStdString(tcp_send_feedback));
-                }
-                spdlog::info("连接流程帧发送验证: ok={}, grpc_ok={}, tcp_ok={}", send_ok, grpc_send_ok, tcp_send_ok);
-            } else {
-                spdlog::warn("连接流程帧发送验证跳过: 导出首帧失败");
-            }
-        } else if (!use_rtc6 && !grpc_test_enabled) {
+        if (!use_rtc6 && !grpc_test_enabled) {
             spdlog::info("连接流程首帧gRPC/TCP并发验证已跳过: gRPC测试未启用");
         }
 
@@ -3423,31 +3422,7 @@ void MainWindow::connectCommunication()
             spdlog::info("杰普特软件对接预留: 当前版本仅提供串口连通性测试与日志输出，业务指令暂未接入。");
         }
 
-        std::string frame_log_path;
-        if (job && job->isValid()) {
-            QString log_dir = QDir::current().absoluteFilePath("log/test");
-            const QString cmake_path = resolveExampleFile("CMakeLists.txt");
-            if (!cmake_path.isEmpty()) {
-                log_dir = QDir(QFileInfo(cmake_path).absolutePath()).absoluteFilePath("log/test");
-            }
-            QDir().mkpath(log_dir);
-
-            // 连接阶段只导出轻量级首帧/首包验证日志，避免对大任务做完整插补展开。
-            const bool frame_dump_ok = nbcam::exportJobFramesForDemo(
-                *job,
-                log_dir.toStdString(),
-                &frame_log_path,
-                nullptr);
-
-            if (frame_dump_ok) {
-                captureGeneratedLog(frame_log_path);
-                spdlog::info("连接数据帧日志已生成(轻量模式): {}", current_log_path_.toStdString());
-            } else {
-                spdlog::warn("连接数据帧日志生成失败，目录: {}", log_dir.toStdString());
-            }
-        } else {
-            spdlog::warn("连接数据帧日志跳过: 当前无有效LaserJob");
-        }
+        spdlog::info("连接流程不生成日志；打开日志固定使用最近一次路径规划/示例生成的frame日志");
 
         const QString grpc_state = use_rtc6 ? "跳过" : (grpc_test_enabled ? (grpc_ok ? "成功" : "失败") : "跳过");
         const QString serial_state = comm_config_.enable_serial_test ? (serial_ok ? "成功" : "失败") : "跳过";
@@ -3590,24 +3565,31 @@ void MainWindow::clearAllLogs()
 void MainWindow::ensureManualOperationDialog()
 {
     if (manual_operation_dialog_) {
+        updateManualOperationStatus();
         return;
     }
 
     manual_operation_dialog_ = new QDialog(this);
     manual_operation_dialog_->setWindowTitle("手动操作");
-    manual_operation_dialog_->resize(320, 300);
+    manual_operation_dialog_->resize(420, 360);
     manual_operation_dialog_->setModal(false);
 
     auto* layout = new QVBoxLayout(manual_operation_dialog_);
     layout->setContentsMargins(12, 12, 12, 12);
     layout->setSpacing(8);
 
-    auto* title_label = new QLabel("手动操作占位界面（功能预留）", manual_operation_dialog_);
+    auto* title_label = new QLabel("振镜手动点动", manual_operation_dialog_);
     layout->addWidget(title_label);
 
-    auto* grid = new QGridLayout();
-    grid->setSpacing(10);
-    layout->addLayout(grid);
+    auto* step_layout = new QHBoxLayout();
+    step_layout->addWidget(new QLabel("步长", manual_operation_dialog_));
+    manual_jog_step_spin_ = new QDoubleSpinBox(manual_operation_dialog_);
+    manual_jog_step_spin_->setDecimals(3);
+    manual_jog_step_spin_->setSingleStep(0.100);
+    manual_jog_step_spin_->setSuffix(" mm");
+    manual_jog_step_spin_->setValue(1.000);
+    step_layout->addWidget(manual_jog_step_spin_, 1);
+    layout->addLayout(step_layout);
 
     const QString arrow_path = resolveExampleFile("assets/view/arrow.png");
     const QString stop_path = resolveExampleFile("assets/view/stop.png");
@@ -3617,39 +3599,777 @@ void MainWindow::ensureManualOperationDialog()
                  arrow_path.toStdString(),
                  stop_path.toStdString());
 
-    auto create_arrow_label = [&arrow_base](const QString& fallback_text, double rotate_deg) {
-        auto* label = new QLabel();
-        label->setFixedSize(72, 72);
-        label->setAlignment(Qt::AlignCenter);
-        label->setText(fallback_text);
+    auto create_arrow_button = [this, &arrow_base](const QString& fallback_text, double rotate_deg) {
+        auto* button = new QToolButton(manual_operation_dialog_);
+        button->setFixedSize(64, 64);
+        button->setText(fallback_text);
+        button->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
         if (!arrow_base.isNull()) {
             const QPixmap rotated = arrow_base.transformed(QTransform().rotate(rotate_deg), Qt::SmoothTransformation);
-            label->setPixmap(rotated.scaled(64, 64, Qt::KeepAspectRatio, Qt::SmoothTransformation));
-            label->setText(QString());
+            button->setIcon(QIcon(rotated));
+            button->setIconSize(QSize(48, 48));
         }
-        return label;
+        return button;
     };
 
-    auto* up_label = create_arrow_label("上", 0.0);
-    auto* down_label = create_arrow_label("下", 180.0);
-    auto* left_label = create_arrow_label("左", -90.0);
-    auto* right_label = create_arrow_label("右", 90.0);
-    auto* stop_label = new QLabel();
-    stop_label->setFixedSize(72, 72);
-    stop_label->setAlignment(Qt::AlignCenter);
-    stop_label->setText("停止");
+    auto* x_minus_button = create_arrow_button("左", -90.0);
+    auto* x_plus_button = create_arrow_button("右", 90.0);
+    auto* y_minus_button = create_arrow_button("Y-", 180.0);
+    auto* y_plus_button = create_arrow_button("Y+", 0.0);
+    auto* z_minus_button = create_arrow_button("Z-", 180.0);
+    auto* z_plus_button = create_arrow_button("Z+", 0.0);
+    auto* stop_button = new QToolButton(manual_operation_dialog_);
+    stop_button->setFixedSize(96, 64);
+    stop_button->setText("回中");
+    stop_button->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
     if (!stop_base.isNull()) {
-        stop_label->setPixmap(stop_base.scaled(64, 64, Qt::KeepAspectRatio, Qt::SmoothTransformation));
-        stop_label->setText(QString());
+        stop_button->setIcon(QIcon(stop_base));
+        stop_button->setIconSize(QSize(48, 48));
     }
 
-    grid->addWidget(up_label, 0, 1, Qt::AlignCenter);
-    grid->addWidget(left_label, 1, 0, Qt::AlignCenter);
-    grid->addWidget(stop_label, 1, 1, Qt::AlignCenter);
-    grid->addWidget(right_label, 1, 2, Qt::AlignCenter);
-    grid->addWidget(down_label, 2, 1, Qt::AlignCenter);
+    connect(x_minus_button, &QToolButton::clicked, this, [this]() {
+        handleManualJog(manual_jog_step_spin_ ? -manual_jog_step_spin_->value() : 0.0, 0.0, 0.0, "X-");
+    });
+    connect(x_plus_button, &QToolButton::clicked, this, [this]() {
+        handleManualJog(manual_jog_step_spin_ ? manual_jog_step_spin_->value() : 0.0, 0.0, 0.0, "X+");
+    });
+    connect(y_minus_button, &QToolButton::clicked, this, [this]() {
+        handleManualJog(0.0, manual_jog_step_spin_ ? -manual_jog_step_spin_->value() : 0.0, 0.0, "Y-");
+    });
+    connect(y_plus_button, &QToolButton::clicked, this, [this]() {
+        handleManualJog(0.0, manual_jog_step_spin_ ? manual_jog_step_spin_->value() : 0.0, 0.0, "Y+");
+    });
+    connect(z_minus_button, &QToolButton::clicked, this, [this]() {
+        handleManualJog(0.0, 0.0, manual_jog_step_spin_ ? -manual_jog_step_spin_->value() : 0.0, "Z-");
+    });
+    connect(z_plus_button, &QToolButton::clicked, this, [this]() {
+        handleManualJog(0.0, 0.0, manual_jog_step_spin_ ? manual_jog_step_spin_->value() : 0.0, "Z+");
+    });
+    connect(stop_button, &QToolButton::clicked, this, &MainWindow::resetManualJogToCenter);
+
+    auto add_axis_row = [this, layout](const QString& label_text, QToolButton* minus_button, QToolButton* plus_button) {
+        auto* row = new QHBoxLayout();
+        auto* label = new QLabel(label_text, manual_operation_dialog_);
+        label->setMinimumWidth(48);
+        row->addWidget(label);
+        row->addStretch(1);
+        row->addWidget(minus_button);
+        row->addWidget(plus_button);
+        row->addStretch(1);
+        layout->addLayout(row);
+    };
+    add_axis_row("X轴:", x_minus_button, x_plus_button);
+    add_axis_row("Y轴:", y_minus_button, y_plus_button);
+    add_axis_row("Z轴:", z_minus_button, z_plus_button);
+
+    manual_jog_position_label_ = new QLabel(manual_operation_dialog_);
+    manual_jog_position_label_->setWordWrap(true);
+    layout->addWidget(manual_jog_position_label_);
+
+    auto* center_layout = new QHBoxLayout();
+    center_layout->addStretch(1);
+    center_layout->addWidget(stop_button);
+    center_layout->addStretch(1);
+    layout->addLayout(center_layout);
 
     layout->addStretch(1);
+    updateManualOperationStatus();
+}
+
+void MainWindow::updateManualOperationStatus()
+{
+    const double x_span = std::max(0.0, comm_config_.x_max_mm - comm_config_.x_min_mm);
+    const double y_span = std::max(0.0, comm_config_.y_max_mm - comm_config_.y_min_mm);
+    const double z_span = std::max(0.0, comm_config_.z_max_mm - comm_config_.z_min_mm);
+    double max_step = std::max({x_span, y_span, z_span});
+    if (x_span > 0.0 && y_span > 0.0 && z_span > 0.0) {
+        max_step = std::min({x_span, y_span, z_span});
+    }
+    max_step = std::max(0.001, max_step);
+
+    if (manual_jog_step_spin_) {
+        const QSignalBlocker blocker(manual_jog_step_spin_);
+        manual_jog_step_spin_->setRange(0.001, max_step);
+        if (manual_jog_step_spin_->value() > max_step) {
+            manual_jog_step_spin_->setValue(max_step);
+        }
+    }
+
+    if (!manual_jog_position_initialized_) {
+        manual_jog_x_mm_ = (comm_config_.x_min_mm + comm_config_.x_max_mm) * 0.5;
+        manual_jog_y_mm_ = (comm_config_.y_min_mm + comm_config_.y_max_mm) * 0.5;
+        manual_jog_z_mm_ = (comm_config_.z_min_mm + comm_config_.z_max_mm) * 0.5;
+        manual_jog_position_initialized_ = true;
+    }
+
+    if (manual_jog_position_label_) {
+        manual_jog_position_label_->setText(
+            QString("当前位置 X=%1 mm, Y=%2 mm, Z=%3 mm\n软限位 X[%4, %5] mm, Y[%6, %7] mm, Z[%8, %9] mm%10")
+                .arg(manual_jog_x_mm_, 0, 'f', 3)
+                .arg(manual_jog_y_mm_, 0, 'f', 3)
+                .arg(manual_jog_z_mm_, 0, 'f', 3)
+                .arg(comm_config_.x_min_mm, 0, 'f', 3)
+                .arg(comm_config_.x_max_mm, 0, 'f', 3)
+                .arg(comm_config_.y_min_mm, 0, 'f', 3)
+                .arg(comm_config_.y_max_mm, 0, 'f', 3)
+                .arg(comm_config_.z_min_mm, 0, 'f', 3)
+                .arg(comm_config_.z_max_mm, 0, 'f', 3)
+                .arg(comm_config_.swap_yz_axes ? QString("\n数据帧通道: Y/Z已交换") : QString()));
+    }
+}
+
+void MainWindow::handleManualJog(double delta_x_mm, double delta_y_mm, double delta_z_mm, const QString& action_name)
+{
+    if (machining_run_state_ != MachiningRunState::Idle) {
+        const QString message = "加工运行中，已拒绝手动点动。";
+        statusBar()->showMessage(message, 3000);
+        spdlog::warn("Manual jog rejected while machining is active: action={}", action_name.toStdString());
+        return;
+    }
+
+    updateManualOperationStatus();
+    const double target_x = std::clamp(manual_jog_x_mm_ + delta_x_mm,
+                                       comm_config_.x_min_mm,
+                                       comm_config_.x_max_mm);
+    const double target_y = std::clamp(manual_jog_y_mm_ + delta_y_mm,
+                                       comm_config_.y_min_mm,
+                                       comm_config_.y_max_mm);
+    const double target_z = std::clamp(manual_jog_z_mm_ + delta_z_mm,
+                                       comm_config_.z_min_mm,
+                                       comm_config_.z_max_mm);
+
+    if (sendManualJogTo(target_x, target_y, target_z, action_name)) {
+        manual_jog_x_mm_ = target_x;
+        manual_jog_y_mm_ = target_y;
+        manual_jog_z_mm_ = target_z;
+        updateManualOperationStatus();
+    }
+}
+
+void MainWindow::resetManualJogToCenter()
+{
+    if (machining_run_state_ != MachiningRunState::Idle) {
+        const QString message = "加工运行中，已拒绝手动回中。";
+        statusBar()->showMessage(message, 3000);
+        spdlog::warn("Manual jog center rejected while machining is active");
+        return;
+    }
+
+    const double center_x = (comm_config_.x_min_mm + comm_config_.x_max_mm) * 0.5;
+    const double center_y = (comm_config_.y_min_mm + comm_config_.y_max_mm) * 0.5;
+    const double center_z = (comm_config_.z_min_mm + comm_config_.z_max_mm) * 0.5;
+    if (sendManualJogTo(center_x, center_y, center_z, "STOP回中")) {
+        manual_jog_x_mm_ = center_x;
+        manual_jog_y_mm_ = center_y;
+        manual_jog_z_mm_ = center_z;
+        manual_jog_position_initialized_ = true;
+        updateManualOperationStatus();
+    }
+}
+
+bool MainWindow::sendManualJogTo(double x_mm, double y_mm, double z_mm, const QString& action_name)
+{
+    QString error;
+    if (!validateTcpTargetForMachining(&error)) {
+        QMessageBox::warning(this, "手动操作", error);
+        spdlog::warn("Manual jog target validation failed: action={}, error={}",
+                     action_name.toStdString(),
+                     error.toStdString());
+        return false;
+    }
+
+    nbcam::BoardExecutor::AxisConfig x_axis;
+    x_axis.offset_mm = comm_config_.x_offset_mm;
+    x_axis.limit_min_mm = comm_config_.x_min_mm;
+    x_axis.limit_max_mm = comm_config_.x_max_mm;
+    nbcam::BoardExecutor::AxisConfig y_axis;
+    y_axis.offset_mm = comm_config_.y_offset_mm;
+    y_axis.limit_min_mm = comm_config_.y_min_mm;
+    y_axis.limit_max_mm = comm_config_.y_max_mm;
+    nbcam::BoardExecutor::AxisConfig z_axis;
+    z_axis.offset_mm = comm_config_.z_offset_mm;
+    z_axis.limit_min_mm = comm_config_.z_min_mm;
+    z_axis.limit_max_mm = comm_config_.z_max_mm;
+    nbcam::BoardExecutor::AxisConfig a_axis;
+    a_axis.offset_mm = comm_config_.a_offset_mm;
+    a_axis.limit_min_mm = comm_config_.a_min_mm;
+    a_axis.limit_max_mm = comm_config_.a_max_mm;
+    nbcam::BoardExecutor::AxisConfig b_axis;
+    b_axis.offset_mm = comm_config_.b_offset_mm;
+    b_axis.limit_min_mm = comm_config_.b_min_mm;
+    b_axis.limit_max_mm = comm_config_.b_max_mm;
+
+    const double a_mm = (comm_config_.a_min_mm + comm_config_.a_max_mm) * 0.5;
+    const double b_mm = (comm_config_.b_min_mm + comm_config_.b_max_mm) * 0.5;
+    const double frame_y_mm = comm_config_.swap_yz_axes ? z_mm : y_mm;
+    const double frame_z_mm = comm_config_.swap_yz_axes ? y_mm : z_mm;
+
+    uint16_t encoded_x = 0;
+    uint16_t encoded_y = 0;
+    uint16_t encoded_z = 0;
+    uint16_t encoded_a = 0x8000;
+    uint16_t encoded_b = 0x8000;
+    QString axis_error;
+    if (!encodeAxisMachining(x_mm, x_axis, "X", &encoded_x, &axis_error) ||
+        !encodeAxisMachining(frame_y_mm, y_axis, comm_config_.swap_yz_axes ? "Z" : "Y", &encoded_y, &axis_error) ||
+        !encodeAxisMachining(frame_z_mm, z_axis, comm_config_.swap_yz_axes ? "Y" : "Z", &encoded_z, &axis_error) ||
+        !encodeAxisMachining(a_mm, a_axis, "A", &encoded_a, &axis_error) ||
+        !encodeAxisMachining(b_mm, b_axis, "B", &encoded_b, &axis_error)) {
+        QMessageBox::warning(this, "手动操作", axis_error);
+        spdlog::warn("Manual jog encode failed: action={}, x_mm={}, y_mm={}, z_mm={}, swap_yz_axes={}, error={}",
+                     action_name.toStdString(),
+                     x_mm,
+                     y_mm,
+                     z_mm,
+                     comm_config_.swap_yz_axes,
+                     axis_error.toStdString());
+        return false;
+    }
+
+    if (!machining_data_buffer_) {
+        machining_data_buffer_ = std::make_unique<nbcam::DataBuffer>();
+    } else if (!machining_data_buffer_->isTcpConnected() && machining_data_buffer_->isTcpThreadRunning()) {
+        machining_data_buffer_->stopTcpThread();
+        machining_data_buffer_ = std::make_unique<nbcam::DataBuffer>();
+    }
+    if (!ensureMachiningTransportConnected(&error)) {
+        QMessageBox::warning(this, "手动操作", error);
+        spdlog::warn("Manual jog TCP connect failed: action={}, target={}:{}, error={}",
+                     action_name.toStdString(),
+                     comm_config_.tcp_host.toStdString(),
+                     comm_config_.tcp_port,
+                     error.toStdString());
+        return false;
+    }
+
+    QByteArray payload;
+    payload.reserve(nbcam::DataBuffer::DATA_BUF_SIZE);
+    const QByteArray begin_frame = packFrameBytes(0, 0, 0, 0, 0, 0xFF00, 0, 0);
+    const QByteArray end_frame = packFrameBytes(0, 0, 0, 0, 0, 0x1100, 0, 0);
+    payload.append(begin_frame);
+    const QByteArray target_frame = packFrameBytes(encoded_b,
+                                                   encoded_a,
+                                                   encoded_z,
+                                                   encoded_y,
+                                                   encoded_x,
+                                                   0x0000,
+                                                   0,
+                                                   0);
+    constexpr int kManualJogTargetHoldFrames = 5000;
+    for (int i = 0; i < kManualJogTargetHoldFrames; ++i) {
+        payload.append(target_frame);
+    }
+    payload.append(end_frame);
+    const int effective_frames = std::max(1, static_cast<int>(payload.size() / 16));
+    if (payload.size() < nbcam::DataBuffer::DATA_BUF_SIZE) {
+        while (payload.size() + end_frame.size() <= nbcam::DataBuffer::DATA_BUF_SIZE) {
+            payload.append(end_frame);
+        }
+        if (payload.size() < nbcam::DataBuffer::DATA_BUF_SIZE) {
+            payload.append(QByteArray(nbcam::DataBuffer::DATA_BUF_SIZE - payload.size(), '\0'));
+        }
+    }
+    const int payload_frames = std::max(1, static_cast<int>(payload.size() / 16));
+
+    spdlog::info("Manual jog send: action={}, target_mm=({}, {}, {}, {}, {}), frame_axis_mm=({}, {}, {}), swap_yz_axes={}, encoded=({}, {}, {}, {}, {}), effective_frames={}, target_hold_frames={}, payload_frames={}, payload_bytes={}, tcp={}:{}",
+                 action_name.toStdString(),
+                 x_mm,
+                 y_mm,
+                 z_mm,
+                 a_mm,
+                 b_mm,
+                 x_mm,
+                 frame_y_mm,
+                 frame_z_mm,
+                 comm_config_.swap_yz_axes,
+                 encoded_x,
+                 encoded_y,
+                 encoded_z,
+                 encoded_a,
+                 encoded_b,
+                 effective_frames,
+                 kManualJogTargetHoldFrames,
+                 payload_frames,
+                 payload.size(),
+                 comm_config_.tcp_host.toStdString(),
+                 comm_config_.tcp_port);
+
+    machining_data_buffer_->appendBytes(payload.constData(), static_cast<size_t>(payload.size()));
+    machining_data_buffer_->forceFill();
+    if (!machining_data_buffer_->waitUntilIdle(std::chrono::milliseconds(std::max(5000, comm_config_.tcp_io_timeout_ms * 50)))) {
+        const QString feedback = QString::fromStdString(machining_data_buffer_->getLastTransportFeedback());
+        const QString state = QString::fromStdString(machining_data_buffer_->describeState());
+        error = QString("手动点动数据帧已写入缓冲，但发送线程未在超时时间内排空。状态=%1%2")
+                    .arg(state)
+                    .arg(feedback.isEmpty() ? QString() : QString("，反馈=%1").arg(feedback));
+        QMessageBox::warning(this, "手动操作", error);
+        spdlog::warn("Manual jog drain timeout: action={}, state={}, feedback={}",
+                     action_name.toStdString(),
+                     state.toStdString(),
+                     feedback.toStdString());
+        return false;
+    }
+
+    const QString feedback = QString::fromStdString(machining_data_buffer_->getLastTransportFeedback());
+    const QString state = QString::fromStdString(machining_data_buffer_->describeState());
+    spdlog::info("Manual jog sent: action={}, target_x_mm={}, target_y_mm={}, target_z_mm={}, frame_y_mm={}, frame_z_mm={}, swap_yz_axes={}, payload_bytes={}, effective_frames={}, target_hold_frames={}, payload_frames={}, state={}, feedback={}",
+                 action_name.toStdString(),
+                 x_mm,
+                 y_mm,
+                 z_mm,
+                 frame_y_mm,
+                 frame_z_mm,
+                 comm_config_.swap_yz_axes,
+                 payload.size(),
+                 effective_frames,
+                 kManualJogTargetHoldFrames,
+                 payload_frames,
+                 state.toStdString(),
+                 feedback.toStdString());
+    statusBar()->showMessage(QString("手动%1: X=%2 mm, Y=%3 mm, Z=%4 mm%5%6")
+                                 .arg(action_name)
+                                 .arg(x_mm, 0, 'f', 3)
+                                 .arg(y_mm, 0, 'f', 3)
+                                 .arg(z_mm, 0, 'f', 3)
+                                 .arg(comm_config_.swap_yz_axes ? QString("，Y/Z已交换") : QString())
+                                 .arg(feedback.isEmpty() ? QString() : QString("，反馈=%1").arg(feedback)),
+                             5000);
+    return true;
+}
+
+void MainWindow::openCalibrationDialog()
+{
+    if (machining_run_state_ != MachiningRunState::Idle) {
+        QMessageBox::warning(this, "加工平面校正", "加工运行中，不能发送校正图案。");
+        spdlog::warn("Calibration dialog rejected while machining is active");
+        return;
+    }
+
+    QDialog dialog(this);
+    dialog.setWindowTitle("加工平面校正");
+    dialog.setMinimumWidth(420);
+
+    auto* layout = new QVBoxLayout(&dialog);
+    auto* summary = new QLabel("将在当前加工平面发送 3x3 正方形阵列。中心位于 X=0, Y=0, Z=0；相邻中心间距 5 mm。", &dialog);
+    summary->setWordWrap(true);
+    layout->addWidget(summary);
+
+    auto* form = new QFormLayout();
+    auto* square_size_spin = new QDoubleSpinBox(&dialog);
+    square_size_spin->setRange(0.1, 20.0);
+    square_size_spin->setDecimals(3);
+    square_size_spin->setSingleStep(0.1);
+    square_size_spin->setValue(2.0);
+    square_size_spin->setSuffix(" mm");
+    form->addRow("正方形边长:", square_size_spin);
+
+    auto* spacing_spin = new QDoubleSpinBox(&dialog);
+    spacing_spin->setRange(0.5, 50.0);
+    spacing_spin->setDecimals(3);
+    spacing_spin->setSingleStep(0.5);
+    spacing_spin->setValue(5.0);
+    spacing_spin->setSuffix(" mm");
+    form->addRow("中心间距:", spacing_spin);
+
+    auto* grid_label = new QLabel("3 x 3", &dialog);
+    form->addRow("阵列:", grid_label);
+
+    auto* center_label = new QLabel("X=0 mm, Y=0 mm, Z=0 mm", &dialog);
+    form->addRow("中心:", center_label);
+
+    auto* swap_label = new QLabel(comm_config_.swap_yz_axes ? "已交换 Y/Z 轴" : "未交换 Y/Z 轴", &dialog);
+    form->addRow("数据帧通道:", swap_label);
+
+    auto* laser_output_check = new QCheckBox("开光加工校正图案", &dialog);
+    laser_output_check->setChecked(true);
+    form->addRow("激光输出:", laser_output_check);
+
+    layout->addLayout(form);
+
+    auto* hint = new QLabel("发送前请确认板卡 TCP 已配置正确，软限位覆盖 X/Y/Z 的 -6 mm 到 6 mm 校正范围。", &dialog);
+    hint->setWordWrap(true);
+    layout->addWidget(hint);
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    auto* send_button = buttons->addButton("发送校正图案", QDialogButtonBox::AcceptRole);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    connect(send_button, &QPushButton::clicked, &dialog, [this,
+                                                         &dialog,
+                                                         square_size_spin,
+                                                         spacing_spin,
+                                                         laser_output_check]() {
+        if (machining_run_state_ != MachiningRunState::Idle) {
+            QMessageBox::warning(&dialog, "加工平面校正", "加工运行中，不能发送校正图案。");
+            spdlog::warn("Calibration send rejected while machining is active");
+            return;
+        }
+
+        const double square_size_mm = square_size_spin->value();
+        const double spacing_mm = spacing_spin->value();
+        const bool laser_output_enabled = laser_output_check->isChecked();
+        QString error;
+        if (!sendCalibrationSquareGrid(square_size_mm, spacing_mm, 3, laser_output_enabled, &error)) {
+            QMessageBox::warning(&dialog, "加工平面校正", error);
+            return;
+        }
+        if (parameter_panel_) {
+            parameter_panel_->setLaserOutputEnabled(laser_output_enabled);
+        }
+        QMessageBox::information(&dialog, "加工平面校正", "校正图案数据帧已下发。");
+    });
+    layout->addWidget(buttons);
+
+    dialog.exec();
+}
+
+bool MainWindow::sendCalibrationSquareGrid(double square_size_mm,
+                                           double spacing_mm,
+                                           int grid_count,
+                                           bool laser_output_enabled,
+                                           QString* out_error)
+{
+    const auto setError = [out_error](const QString& message) {
+        if (out_error) {
+            *out_error = message;
+        }
+    };
+
+    if (machining_run_state_ != MachiningRunState::Idle) {
+        setError("加工运行中，不能发送校正图案。");
+        spdlog::warn("Calibration send rejected while machining is active");
+        return false;
+    }
+    if (!std::isfinite(square_size_mm) || square_size_mm <= 0.0 ||
+        !std::isfinite(spacing_mm) || spacing_mm <= 0.0 ||
+        grid_count < 1 || grid_count % 2 == 0) {
+        setError("校正参数非法：边长、间距必须为正数，阵列数量必须为正奇数。");
+        spdlog::warn("Calibration parameter validation failed: square_size={}, spacing={}, grid_count={}",
+                     square_size_mm,
+                     spacing_mm,
+                     grid_count);
+        return false;
+    }
+
+    QString error;
+    if (!validateTcpTargetForMachining(&error)) {
+        setError(error);
+        spdlog::warn("Calibration TCP target validation failed: error={}", error.toStdString());
+        return false;
+    }
+
+    nbcam::BoardExecutor::AxisConfig x_axis;
+    x_axis.offset_mm = comm_config_.x_offset_mm;
+    x_axis.limit_min_mm = comm_config_.x_min_mm;
+    x_axis.limit_max_mm = comm_config_.x_max_mm;
+    nbcam::BoardExecutor::AxisConfig y_axis;
+    y_axis.offset_mm = comm_config_.y_offset_mm;
+    y_axis.limit_min_mm = comm_config_.y_min_mm;
+    y_axis.limit_max_mm = comm_config_.y_max_mm;
+    nbcam::BoardExecutor::AxisConfig z_axis;
+    z_axis.offset_mm = comm_config_.z_offset_mm;
+    z_axis.limit_min_mm = comm_config_.z_min_mm;
+    z_axis.limit_max_mm = comm_config_.z_max_mm;
+    nbcam::BoardExecutor::AxisConfig a_axis;
+    a_axis.offset_mm = comm_config_.a_offset_mm;
+    a_axis.limit_min_mm = comm_config_.a_min_mm;
+    a_axis.limit_max_mm = comm_config_.a_max_mm;
+    nbcam::BoardExecutor::AxisConfig b_axis;
+    b_axis.offset_mm = comm_config_.b_offset_mm;
+    b_axis.limit_min_mm = comm_config_.b_min_mm;
+    b_axis.limit_max_mm = comm_config_.b_max_mm;
+
+    const double a_mm = (comm_config_.a_min_mm + comm_config_.a_max_mm) * 0.5 + comm_config_.a_offset_mm;
+    const double b_mm = (comm_config_.b_min_mm + comm_config_.b_max_mm) * 0.5 + comm_config_.b_offset_mm;
+    uint16_t encoded_a = 0x8000;
+    uint16_t encoded_b = 0x8000;
+    QString axis_error;
+    if (!encodeAxisMachining(a_mm, a_axis, "A", &encoded_a, &axis_error) ||
+        !encodeAxisMachining(b_mm, b_axis, "B", &encoded_b, &axis_error)) {
+        setError(axis_error);
+        spdlog::warn("Calibration A/B encode failed: a_mm={}, b_mm={}, error={}",
+                     a_mm,
+                     b_mm,
+                     axis_error.toStdString());
+        return false;
+    }
+
+    struct CalibrationPoint {
+        double x = 0.0;
+        double y = 0.0;
+        double z = 0.0;
+        MachineEncodedPoint encoded;
+    };
+
+    const auto encodeLogicalPoint = [&](double x_mm,
+                                        double y_mm,
+                                        double z_mm,
+                                        CalibrationPoint* out_point,
+                                        QString* point_error) -> bool {
+        const double physical_x_mm = x_mm + comm_config_.x_offset_mm;
+        const double frame_y_mm = (comm_config_.swap_yz_axes ? z_mm : y_mm) + comm_config_.y_offset_mm;
+        const double frame_z_mm = (comm_config_.swap_yz_axes ? y_mm : z_mm) + comm_config_.z_offset_mm;
+
+        MachineEncodedPoint encoded;
+        encoded.a = encoded_a;
+        encoded.b = encoded_b;
+        QString local_error;
+        if (!encodeAxisMachining(physical_x_mm, x_axis, "X", &encoded.x, &local_error) ||
+            !encodeAxisMachining(frame_y_mm, y_axis, comm_config_.swap_yz_axes ? "Z" : "Y", &encoded.y, &local_error) ||
+            !encodeAxisMachining(frame_z_mm, z_axis, comm_config_.swap_yz_axes ? "Y" : "Z", &encoded.z, &local_error)) {
+            if (point_error) {
+                *point_error = QString("校正点 X=%1, Y=%2, Z=%3 编码失败: %4")
+                                   .arg(x_mm, 0, 'f', 3)
+                                   .arg(y_mm, 0, 'f', 3)
+                                   .arg(z_mm, 0, 'f', 3)
+                                   .arg(local_error);
+            }
+            return false;
+        }
+
+        if (out_point) {
+            out_point->x = x_mm;
+            out_point->y = y_mm;
+            out_point->z = z_mm;
+            out_point->encoded = encoded;
+        }
+        return true;
+    };
+
+    QByteArray payload;
+    payload.reserve(nbcam::DataBuffer::DATA_BUF_SIZE);
+    int frame_count = 0;
+    bool saw_mark_output = false;
+
+    const auto appendFrame = [&](const MachineEncodedPoint& point, bool mark_output) {
+        const bool effective_mark = laser_output_enabled && mark_output;
+        payload.append(packFrameBytes(point.b,
+                                      point.a,
+                                      point.z,
+                                      point.y,
+                                      point.x,
+                                      effective_mark ? 0x00FF : 0x0000,
+                                      0,
+                                      0));
+        ++frame_count;
+        saw_mark_output = saw_mark_output || effective_mark;
+    };
+
+    const auto appendControlFrame = [&](uint16_t opcode) {
+        payload.append(packFrameBytes(0, 0, 0, 0, 0, opcode, 0, 0));
+        ++frame_count;
+    };
+
+    const auto appendDelayFrames = [&](const MachineEncodedPoint& point, int delay_us, int delay_on_us) {
+        constexpr int kTickUs = 10;
+        const int total_ticks = std::max(0, delay_us / kTickUs);
+        const int mark_ticks = std::min(total_ticks, std::max(0, delay_on_us) / kTickUs);
+        for (int i = 0; i < total_ticks; ++i) {
+            appendFrame(point, i < mark_ticks);
+        }
+    };
+
+    const auto appendInterpolatedFrames = [&](const MachineEncodedPoint& start,
+                                              const MachineEncodedPoint& end,
+                                              double speed_mm_s,
+                                              bool mark_segment,
+                                              int laser_on_delay_us,
+                                              int* mark_elapsed_us) {
+        const int sample_count = computeInterpolationSamplesForMachining(start.x,
+                                                                         start.y,
+                                                                         start.z,
+                                                                         end.x,
+                                                                         end.y,
+                                                                         end.z,
+                                                                         speed_mm_s);
+        int local_mark_elapsed_us = mark_elapsed_us ? *mark_elapsed_us : 0;
+        for (int i = 1; i <= sample_count; ++i) {
+            MachineEncodedPoint point;
+            point.x = interpolateAxisForMachining(start.x, end.x, i, sample_count);
+            point.y = interpolateAxisForMachining(start.y, end.y, i, sample_count);
+            point.z = interpolateAxisForMachining(start.z, end.z, i, sample_count);
+            point.a = interpolateAxisForMachining(start.a, end.a, i, sample_count);
+            point.b = interpolateAxisForMachining(start.b, end.b, i, sample_count);
+            bool mark = false;
+            if (mark_segment) {
+                mark = local_mark_elapsed_us >= laser_on_delay_us;
+                local_mark_elapsed_us += 10;
+            }
+            appendFrame(point, mark);
+        }
+        if (mark_elapsed_us) {
+            *mark_elapsed_us = local_mark_elapsed_us;
+        }
+    };
+
+    appendControlFrame(0xFF00);
+
+    const double half_size_mm = square_size_mm * 0.5;
+    const int center_offset = grid_count / 2;
+    const double mark_speed_mm_s = parameter_panel_ ? parameter_panel_->getSpeed() : 300.0;
+    const double safe_mark_speed_mm_s = std::max(1.0, mark_speed_mm_s);
+    const double safe_jump_speed_mm_s = std::max(1.0, static_cast<double>(comm_config_.jump_speed_mm_s));
+    bool has_prev = false;
+    MachineEncodedPoint prev_encoded{};
+    int square_index = 0;
+
+    spdlog::info("Calibration grid send begin: square_size_mm={}, spacing_mm={}, grid={}x{}, laser_output={}, swap_yz_axes={}, mark_speed_mm_s={}, jump_speed_mm_s={}, delays(on/off/mark/jump/polygon)={}/{}/{}/{}/{}us, tcp={}:{}",
+                 square_size_mm,
+                 spacing_mm,
+                 grid_count,
+                 grid_count,
+                 laser_output_enabled ? "on" : "off",
+                 comm_config_.swap_yz_axes,
+                 safe_mark_speed_mm_s,
+                 safe_jump_speed_mm_s,
+                 comm_config_.laser_on_delay_us,
+                 comm_config_.laser_off_delay_us,
+                 comm_config_.mark_delay_us,
+                 comm_config_.jump_delay_us,
+                 comm_config_.polygon_delay_us,
+                 comm_config_.tcp_host.toStdString(),
+                 comm_config_.tcp_port);
+
+    for (int row = -center_offset; row <= center_offset; ++row) {
+        for (int col = -center_offset; col <= center_offset; ++col) {
+            const double cx = static_cast<double>(col) * spacing_mm;
+            const double cy = static_cast<double>(row) * spacing_mm;
+            const double z = 0.0;
+            std::array<CalibrationPoint, 5> corners;
+            const std::array<std::array<double, 3>, 5> logical_corners = {{
+                {{cx - half_size_mm, cy - half_size_mm, z}},
+                {{cx + half_size_mm, cy - half_size_mm, z}},
+                {{cx + half_size_mm, cy + half_size_mm, z}},
+                {{cx - half_size_mm, cy + half_size_mm, z}},
+                {{cx - half_size_mm, cy - half_size_mm, z}},
+            }};
+            for (size_t i = 0; i < logical_corners.size(); ++i) {
+                if (!encodeLogicalPoint(logical_corners[i][0],
+                                        logical_corners[i][1],
+                                        logical_corners[i][2],
+                                        &corners[i],
+                                        &axis_error)) {
+                    setError(axis_error);
+                    spdlog::warn("Calibration encode failed: square={}, corner={}, error={}",
+                                 square_index,
+                                 i,
+                                 axis_error.toStdString());
+                    return false;
+                }
+            }
+
+            spdlog::info("Calibration square {}: center_logic_mm=({}, {}, 0), corners_logic_mm=[({}, {}, 0), ({}, {}, 0), ({}, {}, 0), ({}, {}, 0)], frame_axis_note={}, encoded_start=(x={}, y={}, z={}, a={}, b={})",
+                         square_index,
+                         cx,
+                         cy,
+                         corners[0].x,
+                         corners[0].y,
+                         corners[1].x,
+                         corners[1].y,
+                         corners[2].x,
+                         corners[2].y,
+                         corners[3].x,
+                         corners[3].y,
+                         comm_config_.swap_yz_axes ? "frame_y=logic_z, frame_z=logic_y" : "frame_y=logic_y, frame_z=logic_z",
+                         corners[0].encoded.x,
+                         corners[0].encoded.y,
+                         corners[0].encoded.z,
+                         corners[0].encoded.a,
+                         corners[0].encoded.b);
+
+            if (has_prev) {
+                appendInterpolatedFrames(prev_encoded, corners[0].encoded, safe_jump_speed_mm_s, false, 0, nullptr);
+            } else {
+                appendFrame(corners[0].encoded, false);
+            }
+            appendDelayFrames(corners[0].encoded, comm_config_.jump_delay_us, 0);
+
+            int mark_elapsed_us = 0;
+            for (size_t i = 1; i < corners.size(); ++i) {
+                appendInterpolatedFrames(corners[i - 1].encoded,
+                                         corners[i].encoded,
+                                         safe_mark_speed_mm_s,
+                                         true,
+                                         comm_config_.laser_on_delay_us,
+                                         &mark_elapsed_us);
+                appendDelayFrames(corners[i].encoded, comm_config_.polygon_delay_us, comm_config_.laser_off_delay_us);
+            }
+            appendDelayFrames(corners.back().encoded, comm_config_.mark_delay_us, comm_config_.laser_off_delay_us);
+            prev_encoded = corners.back().encoded;
+            has_prev = true;
+            ++square_index;
+        }
+    }
+
+    appendControlFrame(0x1100);
+    const int effective_frames = frame_count;
+    const QByteArray end_frame = packFrameBytes(0, 0, 0, 0, 0, 0x1100, 0, 0);
+    if (payload.size() < nbcam::DataBuffer::DATA_BUF_SIZE) {
+        while (payload.size() + end_frame.size() <= nbcam::DataBuffer::DATA_BUF_SIZE) {
+            payload.append(end_frame);
+        }
+        if (payload.size() < nbcam::DataBuffer::DATA_BUF_SIZE) {
+            payload.append(QByteArray(nbcam::DataBuffer::DATA_BUF_SIZE - payload.size(), '\0'));
+        }
+    }
+    const int payload_frames = std::max(1, static_cast<int>(payload.size() / 16));
+
+    if (!machining_data_buffer_) {
+        machining_data_buffer_ = std::make_unique<nbcam::DataBuffer>();
+    } else if (!machining_data_buffer_->isTcpConnected() && machining_data_buffer_->isTcpThreadRunning()) {
+        machining_data_buffer_->stopTcpThread();
+        machining_data_buffer_ = std::make_unique<nbcam::DataBuffer>();
+    }
+    if (!ensureMachiningTransportConnected(&error)) {
+        setError(error);
+        spdlog::warn("Calibration TCP connect failed: target={}:{}, error={}",
+                     comm_config_.tcp_host.toStdString(),
+                     comm_config_.tcp_port,
+                     error.toStdString());
+        return false;
+    }
+
+    spdlog::info("Calibration payload ready: squares={}, effective_frames={}, payload_frames={}, payload_bytes={}, mark_output_seen={}",
+                 square_index,
+                 effective_frames,
+                 payload_frames,
+                 payload.size(),
+                 saw_mark_output ? "true" : "false");
+
+    machining_data_buffer_->appendBytes(payload.constData(), static_cast<size_t>(payload.size()));
+    machining_data_buffer_->forceFill();
+    if (!machining_data_buffer_->waitUntilIdle(std::chrono::milliseconds(std::max(5000, comm_config_.tcp_io_timeout_ms * 50)))) {
+        const QString feedback = QString::fromStdString(machining_data_buffer_->getLastTransportFeedback());
+        const QString state = QString::fromStdString(machining_data_buffer_->describeState());
+        error = QString("校正图案数据帧已写入缓冲，但发送线程未在超时时间内排空。状态=%1%2")
+                    .arg(state)
+                    .arg(feedback.isEmpty() ? QString() : QString("，反馈=%1").arg(feedback));
+        setError(error);
+        spdlog::warn("Calibration drain timeout: state={}, feedback={}",
+                     state.toStdString(),
+                     feedback.toStdString());
+        return false;
+    }
+
+    const QString feedback = QString::fromStdString(machining_data_buffer_->getLastTransportFeedback());
+    const QString state = QString::fromStdString(machining_data_buffer_->describeState());
+    spdlog::info("Calibration grid sent: squares={}, square_size_mm={}, spacing_mm={}, laser_output={}, swap_yz_axes={}, payload_bytes={}, effective_frames={}, payload_frames={}, state={}, feedback={}",
+                 square_index,
+                 square_size_mm,
+                 spacing_mm,
+                 laser_output_enabled ? "on" : "off",
+                 comm_config_.swap_yz_axes,
+                 payload.size(),
+                 effective_frames,
+                 payload_frames,
+                 state.toStdString(),
+                 feedback.toStdString());
+    statusBar()->showMessage(QString("校正图案已下发: 3x3, 边长%1 mm, 间距%2 mm%3%4")
+                                 .arg(square_size_mm, 0, 'f', 3)
+                                 .arg(spacing_mm, 0, 'f', 3)
+                                 .arg(comm_config_.swap_yz_axes ? QString("，Y/Z已交换") : QString())
+                                 .arg(feedback.isEmpty() ? QString() : QString("，反馈=%1").arg(feedback)),
+                             5000);
+    return true;
 }
 
 void MainWindow::openManualOperationPanel()
@@ -4147,14 +4867,7 @@ void MainWindow::executeJob()
     nbcam::LaserJob* const job = controller_->getCurrentJob();
     const bool use_rtc6 = (comm_config_.executor_backend == ExecutorBackend::RTC6);
     const bool dry_run_only = comm_config_.dry_run_only;
-    bool live_laser_output_enabled = false;
-    bool segment_feedback_enabled = true;
-    if (!dry_run_only) {
-        if (!queryMachiningStartOptions(this, "执行任务", &live_laser_output_enabled, &segment_feedback_enabled)) {
-            statusBar()->showMessage("已取消下发", 3000);
-            return;
-        }
-    }
+    const bool live_laser_output_enabled = parameter_panel_ && parameter_panel_->isLaserOutputEnabled();
     if (!dry_run_only) {
         QString region_error;
         if (!currentModelFitsProcessingRegion(&region_error)) {
@@ -4196,6 +4909,7 @@ void MainWindow::executeJob()
         machine_config.live_laser_enabled = !dry_run_only;
         machine_config.mask_laser_output = !dry_run_only && !live_laser_output_enabled;
         machine_config.apply_job_transform = comm_config_.apply_job_transform;
+        machine_config.swap_yz_axes = comm_config_.swap_yz_axes;
         machine_config.units_per_mm = comm_config_.rtc6_units_per_mm;
         machine_config.default_mark_speed_mm_s = comm_config_.rtc6_mark_speed_mm_s;
         machine_config.default_jump_speed_mm_s = comm_config_.rtc6_jump_speed_mm_s;
@@ -4222,26 +4936,6 @@ void MainWindow::executeJob()
             QMessageBox::warning(this, "预检失败", QString::fromStdString(preflight_error));
             statusBar()->showMessage("预检失败", 4000);
             return;
-        }
-
-        if (!dry_run_only) {
-            const QString confirm_text = QString(
-                "即将执行当前任务到RTC-6。\n\n"
-                "CardNo: %1\n"
-                "总点数: %2\n"
-                "Mark点: %3\n"
-                "Jump点: %4\n"
-                "激光输出: %5\n\n"
-                "请确认硬件急停、光闸和加工环境均已就绪。")
-                                            .arg(comm_config_.rtc6_card_no)
-                                            .arg(static_cast<qulonglong>(report.total_points))
-                                            .arg(static_cast<qulonglong>(report.mark_points))
-                                            .arg(static_cast<qulonglong>(report.jump_points))
-                                            .arg(live_laser_output_enabled ? "开光" : "不开光");
-            if (QMessageBox::question(this, "确认RTC-6下发", confirm_text, QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) {
-                statusBar()->showMessage("已取消下发", 3000);
-                return;
-            }
         }
 
         if (!executor.initialize()) {
@@ -4274,6 +4968,7 @@ void MainWindow::executeJob()
     machine_config.axis_mode = (comm_config_.axis_mode == AxisMode::FiveAxis)
         ? nbcam::BoardExecutor::AxisMode::FiveAxis
         : nbcam::BoardExecutor::AxisMode::ThreeAxis;
+    machine_config.swap_yz_axes = comm_config_.swap_yz_axes;
     machine_config.x_axis.offset_mm = comm_config_.x_offset_mm;
     machine_config.x_axis.limit_min_mm = comm_config_.x_min_mm;
     machine_config.x_axis.limit_max_mm = comm_config_.x_max_mm;
@@ -4303,27 +4998,6 @@ void MainWindow::executeJob()
         QMessageBox::warning(this, "预检失败", QString::fromStdString(preflight_error));
         statusBar()->showMessage("预检失败", 4000);
         return;
-    }
-
-    if (!dry_run_only) {
-        const QString confirm_text = QString(
-            "即将通过TCP下发当前任务。\n\n"
-            "目标: %1:%2\n"
-            "总点数: %3\n"
-            "Mark点: %4\n"
-            "Jump点: %5\n"
-            "激光输出: %6\n\n"
-            "请确认硬件急停、光闸和加工环境均已就绪。")
-                                        .arg(comm_config_.tcp_host)
-                                        .arg(comm_config_.tcp_port)
-                                        .arg(static_cast<qulonglong>(report.total_points))
-                                        .arg(static_cast<qulonglong>(report.mark_points))
-                                        .arg(static_cast<qulonglong>(report.jump_points))
-                                        .arg(live_laser_output_enabled ? "开光" : "不开光");
-        if (QMessageBox::question(this, "确认真实下发", confirm_text, QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) {
-            statusBar()->showMessage("已取消真实下发", 3000);
-            return;
-        }
     }
 
     if (!executor.initialize()) {
@@ -4641,29 +5315,23 @@ void MainWindow::onPlanPath()
                 }
                 QDir().mkpath(log_dir);
 
-                const bool export_ok = nbcam::exportConnectionFrameLog(
+                const bool export_ok = nbcam::exportJobFramesForDemo(
                     *job,
                     log_dir.toStdString(),
-                    false,
-                    "NOT_TESTED",
-                    false,
-                    "NOT_TESTED",
-                    comm_config_.grpc_endpoint.toStdString(),
-                    QString("%1:%2").arg(comm_config_.tcp_host).arg(comm_config_.tcp_port).toStdString(),
-                    comm_config_.enable_serial_test,
-                    false,
-                    comm_config_.enable_serial_test ? "NOT_TESTED" : "SKIPPED",
-                    &frame_log_path);
+                    &frame_log_path,
+                    nullptr,
+                    comm_config_.swap_yz_axes,
+                    parameter_panel_ && parameter_panel_->isLaserOutputEnabled());
                 if (export_ok) {
-                    captureGeneratedLog(frame_log_path);
-                    spdlog::info("路径规划连接帧日志已生成: {}", current_log_path_.toStdString());
+                    captureGeneratedLog(frame_log_path, {}, {}, "frame");
+                    spdlog::info("路径规划frame日志已生成: {}", current_log_path_.toStdString());
                     plan_status += QString("，日志=%1")
                                        .arg(QFileInfo(current_log_path_).fileName());
                 } else {
-                    spdlog::warn("路径规划连接帧日志导出失败，目录: {}", log_dir.toStdString());
+                    spdlog::warn("路径规划frame日志导出失败，目录: {}", log_dir.toStdString());
                 }
             } else {
-                spdlog::warn("路径规划连接帧日志跳过: 当前无有效LaserJob");
+                spdlog::warn("路径规划frame日志跳过: 当前无有效LaserJob");
             }
 
             statusBar()->showMessage(plan_status, 5000);
@@ -5525,17 +6193,19 @@ QString MainWindow::sanitizeLogNamePart(const QString& raw, const QString& fallb
     return value;
 }
 
-QString MainWindow::buildUnifiedLogFileName(const QString& model_path, const QString& svg_path) const
+QString MainWindow::buildUnifiedLogFileName(const QString& prefix, const QString& model_path, const QString& svg_path) const
 {
+    const QString prefix_part = sanitizeLogNamePart(prefix, "frame");
     const QString model_part = sanitizeLogNamePart(model_path, "unknown_model");
     const QString svg_part = sanitizeLogNamePart(svg_path, "unknown_svg");
     const QString timestamp = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss_zzz");
-    return QString("frame_%1_%2-%3.log").arg(model_part, svg_part, timestamp);
+    return QString("%1_%2_%3-%4.log").arg(prefix_part, model_part, svg_part, timestamp);
 }
 
 bool MainWindow::captureGeneratedLog(const std::string& generated_log_path,
                                      const QString& model_path,
-                                     const QString& svg_path)
+                                     const QString& svg_path,
+                                     const QString& prefix)
 {
     const QString source_path = QFileInfo(QString::fromStdString(generated_log_path)).absoluteFilePath();
     if (source_path.isEmpty() || !QFileInfo::exists(source_path)) {
@@ -5546,7 +6216,7 @@ bool MainWindow::captureGeneratedLog(const std::string& generated_log_path,
     const QString effective_svg = svg_path.isEmpty() ? current_svg_path_ : svg_path;
 
     const QDir source_dir(QFileInfo(source_path).absolutePath());
-    const QString default_target_name = buildUnifiedLogFileName(effective_model, effective_svg);
+    const QString default_target_name = buildUnifiedLogFileName(prefix, effective_model, effective_svg);
     QString target_path = source_dir.absoluteFilePath(default_target_name);
     const QString target_base_name = QFileInfo(default_target_name).completeBaseName();
     const QString target_ext = QFileInfo(default_target_name).suffix();
@@ -5933,6 +6603,12 @@ void MainWindow::runValidationExample(double spacing_mm, const ValidationExample
     }
     current_model_path_ = QFileInfo(model_path).absoluteFilePath();
     current_svg_path_ = QFileInfo(svg_path).absoluteFilePath();
+    if (options.force_laser_output && parameter_panel_) {
+        parameter_panel_->setLaserOutputEnabled(true);
+    }
+    if (options.force_swap_yz_axes) {
+        comm_config_.swap_yz_axes = true;
+    }
 
     QProgressDialog progress(QString("正在执行验证示例流程（间隔 %1 mm）...").arg(spacing_mm, 0, 'f', 3), "取消", 0, 0, this);
     progress.setWindowModality(Qt::WindowModal);
@@ -6170,70 +6846,30 @@ void MainWindow::runValidationExample(double spacing_mm, const ValidationExample
     updateUIWithoutMesh();
     model_view_->selectPatch(patch_id);
 
-    QString log_dir = QDir::current().absoluteFilePath(options.export_connection_frame_log ? "log/test" : "log");
+    QString log_dir = QDir::current().absoluteFilePath("log");
     const QString cmake_path = resolveExampleFile("CMakeLists.txt");
     if (!cmake_path.isEmpty()) {
-        log_dir = QDir(QFileInfo(cmake_path).absolutePath())
-                      .absoluteFilePath(options.export_connection_frame_log ? "log/test" : "log");
+        log_dir = QDir(QFileInfo(cmake_path).absolutePath()).absoluteFilePath("log");
     }
     QDir().mkpath(log_dir);
 
     std::string frame_log_path;
     nbcam::LaserJob* job = controller_->getCurrentJob();
     if (job && job->isValid()) {
-        if (options.export_connection_frame_log) {
-            bool grpc_ok = false;
-            bool tcp_ok = false;
-            QString grpc_feedback = "N/A";
-            QString tcp_feedback = "N/A";
-            if (options.run_comm_probe_for_log) {
-                grpc_ok = testGrpcCommunicationImpl(&grpc_feedback);
-                tcp_ok = testTcpCommunicationImpl(&tcp_feedback);
-            }
-
-            const bool export_ok = nbcam::exportConnectionFrameLog(
-                *job,
-                log_dir.toStdString(),
-                grpc_ok,
-                grpc_feedback.toStdString(),
-                tcp_ok,
-                tcp_feedback.toStdString(),
-                comm_config_.grpc_endpoint.toStdString(),
-                QString("%1:%2").arg(comm_config_.tcp_host).arg(comm_config_.tcp_port).toStdString(),
-                false,
-                false,
-                "SKIPPED",
-                &frame_log_path);
-            if (export_ok) {
-                captureGeneratedLog(frame_log_path, model_path, svg_path);
-                spdlog::info("验证示例连接帧日志: {}", current_log_path_.toStdString());
-            } else {
-                spdlog::warn("验证示例连接帧日志导出失败，目录: {}", log_dir.toStdString());
-            }
+        const bool export_ok = nbcam::exportJobFramesForDemo(*job,
+                                                             log_dir.toStdString(),
+                                                             &frame_log_path,
+                                                             nullptr,
+                                                             comm_config_.swap_yz_axes,
+                                                             parameter_panel_ && parameter_panel_->isLaserOutputEnabled());
+        if (export_ok) {
+            captureGeneratedLog(frame_log_path, model_path, svg_path, "frame");
+            spdlog::info("验证示例frame日志: {}", current_log_path_.toStdString());
         } else {
-            std::string grpc_log_path;
-            std::array<uint16_t, 8> first_data_frame{};
-            const bool export_ok = nbcam::exportJobFramesForDemo(*job,
-                                                                 log_dir.toStdString(),
-                                                                 &frame_log_path,
-                                                                 &first_data_frame);
-            if (export_ok) {
-                const bool grpc_demo_ok = nbcam::sendFrameGrpcTcpDemo(first_data_frame,
-                                                                      log_dir.toStdString(),
-                                                                      &grpc_log_path);
-                captureGeneratedLog(frame_log_path, model_path, svg_path);
-                spdlog::info("示例帧映射日志: {}", current_log_path_.toStdString());
-                captureGeneratedLog(grpc_log_path, model_path, svg_path);
-                spdlog::info("示例 gRPC+TCP示例日志: {}", current_log_path_.toStdString());
-                if (!grpc_demo_ok) {
-                    spdlog::warn("示例 gRPC+TCP单帧发送示例执行失败，请查看日志: {}", current_log_path_.toStdString());
-                }
-            } else {
-                spdlog::warn("示例帧映射日志导出失败，目录: {}", log_dir.toStdString());
-            }
+            spdlog::warn("验证示例frame日志导出失败，目录: {}", log_dir.toStdString());
         }
     } else {
-        spdlog::warn("验证示例未生成有效任务，跳过帧日志导出");
+        spdlog::warn("验证示例未生成有效任务，跳过frame日志导出");
     }
 
     const QString target_triangles_text = options.adaptive_target_triangles > 0

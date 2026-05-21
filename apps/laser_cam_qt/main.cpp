@@ -256,7 +256,7 @@ void printCliHelp(QTextStream& out)
     out << "  status" << Qt::endl;
     out << "  pwd" << Qt::endl;
     out << "  cd <path>" << Qt::endl;
-    out << "  ls [path]" << Qt::endl;
+    out << "  ls [path] / dir [path]" << Qt::endl;
     out << "  load_model <path>" << Qt::endl;
     out << "  parameterize [LSCM|ARAP|AUTHALIC]" << Qt::endl;
     out << "  import_svg <path> [tile_u] [tile_v]" << Qt::endl;
@@ -267,7 +267,9 @@ void printCliHelp(QTextStream& out)
     out << "  save_job <path>" << Qt::endl;
     out << "  load_job <path>" << Qt::endl;
     out << "  estimate_time" << Qt::endl;
-    out << "  exit" << Qt::endl;
+    out << "  exit / quit" << Qt::endl;
+    out << Qt::endl;
+    out << "Paths are resolved relative to the current CLI working directory; use quotes for paths with spaces." << Qt::endl;
     out << Qt::endl;
     out << "Strategy examples: line_hatch, arc_hatch, contour, ring, ring_outin," << Qt::endl;
     out << "or GUI names such as 轴向往返填充 / 轴向往返填充(圆弧)." << Qt::endl;

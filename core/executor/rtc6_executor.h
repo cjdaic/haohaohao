@@ -28,6 +28,7 @@ public:
         uint32_t card_no = 1;
         bool dry_run_only = true;
         bool apply_job_transform = true;
+        bool swap_yz_axes = false;
         bool live_laser_enabled = false;
         bool mask_laser_output = false;
         double units_per_mm = 1000.0;
@@ -82,6 +83,7 @@ private:
                            std::string* out_error,
                            bool* out_used_job_transform = nullptr) const;
     bool transformCoordinates(double& x, double& y, double& z, const std::vector<double>& transform) const;
+    void applyAxisSwapIfNeeded(double& y, double& z) const;
     static bool checkAxisRange(double mm,
                                const AxisConfig& axis_config,
                                const char* axis_name,

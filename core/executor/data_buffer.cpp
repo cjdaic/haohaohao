@@ -169,6 +169,7 @@ bool DataBuffer::tryGetReadBuf(int* out_index)
     if (out_index) {
         *out_index = p;
     }
+    in_flight_read_buffers_.fetch_add(1);
     return true;
 }
 
@@ -179,6 +180,11 @@ bool DataBuffer::hasPendingReadBuf()
 }
 
 void DataBuffer::readEnd(int buf_index) {
+    const int previous_in_flight = in_flight_read_buffers_.fetch_sub(1);
+    if (previous_in_flight <= 0) {
+        in_flight_read_buffers_.store(0);
+        spdlog::warn("读缓冲在途计数异常");
+    }
     std::lock_guard<std::mutex> lock(wr_mutex_);
     if (wr_queue_.size() >= DATA_BUF_NUM) {
         spdlog::warn("写队列异常");
@@ -230,12 +236,8 @@ void DataBuffer::setTransportConfig(const TcpSocket::Config& config) {
 
 bool DataBuffer::waitUntilIdle(std::chrono::milliseconds timeout)
 {
-    if (!tcp_thread_running_.load()) {
-        return true;
-    }
-
     const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (tcp_thread_running_.load()) {
+    while (true) {
         bool read_queue_empty = false;
         size_t write_queue_size = 0;
         {
@@ -247,7 +249,15 @@ bool DataBuffer::waitUntilIdle(std::chrono::milliseconds timeout)
             write_queue_size = wr_queue_.size();
         }
 
-        if (read_queue_empty && write_queue_size >= static_cast<size_t>(DATA_BUF_NUM - 1)) {
+        const int in_flight = in_flight_read_buffers_.load();
+        if (read_queue_empty &&
+            write_queue_size >= static_cast<size_t>(DATA_BUF_NUM - 1) &&
+            in_flight == 0 &&
+            ptr_ == 0) {
+            return true;
+        }
+
+        if (!tcp_thread_running_.load() && read_queue_empty && in_flight == 0) {
             return true;
         }
 
@@ -264,6 +274,7 @@ std::string DataBuffer::describeState()
 {
     bool running = tcp_thread_running_.load();
     bool connected = tcp_connected_.load();
+    int in_flight = in_flight_read_buffers_.load();
     size_t read_queue_size = 0;
     size_t write_queue_size = 0;
     {
@@ -279,6 +290,7 @@ std::string DataBuffer::describeState()
            ", connected=" + std::string(connected ? "true" : "false") +
            ", read_queue=" + std::to_string(read_queue_size) +
            ", write_queue=" + std::to_string(write_queue_size) +
+           ", in_flight=" + std::to_string(in_flight) +
            ", ptr=" + std::to_string(ptr_);
 }
 

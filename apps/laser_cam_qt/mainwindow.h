@@ -19,6 +19,8 @@ class QActionGroup;
 class QAbstractButton;
 class QMenu;
 class QDialog;
+class QDoubleSpinBox;
+class QLabel;
 class QPushButton;
 class QToolButton;
 class QTranslator;
@@ -101,6 +103,7 @@ private slots:
     void onRefreshMachining();
     void onSimulationToggled(bool enabled);
     void processMachiningStep();
+    void openCalibrationDialog();
     
     // 控制器信号响应
     void onModelLoaded(bool success);
@@ -115,8 +118,9 @@ private:
         QString svg_relative_path = "docs/nano.svg";
         QString strategy_override;
         size_t adaptive_target_triangles = 0;
-        bool export_connection_frame_log = false;
         bool run_comm_probe_for_log = false;
+        bool force_laser_output = false;
+        bool force_swap_yz_axes = false;
         double arc_center_x = 20.0;
         double arc_center_z = -15.0;
         double arc_radius = 20.0;
@@ -148,10 +152,11 @@ private:
     QString resolveExampleFile(const QString& relative_path) const;
     QString resolveProjectLogRoot() const;
     QString sanitizeLogNamePart(const QString& raw, const QString& fallback) const;
-    QString buildUnifiedLogFileName(const QString& model_path, const QString& svg_path) const;
+    QString buildUnifiedLogFileName(const QString& prefix, const QString& model_path, const QString& svg_path) const;
     bool captureGeneratedLog(const std::string& generated_log_path,
                              const QString& model_path = QString(),
-                             const QString& svg_path = QString());
+                             const QString& svg_path = QString(),
+                             const QString& prefix = QString("frame"));
     bool computePatchUVBounds(int patch_id, double& u_min, double& u_max, double& v_min, double& v_max) const;
     void registerPatchInUVLayout(int patch_id, const UVDisplayRange& raw_range);
     UVDisplayRange resolveDisplayRangeForPatch(int patch_id, const UVDisplayRange& raw_fallback) const;
@@ -181,6 +186,15 @@ private:
     bool testTcpCommunicationImpl(QString* out_feedback = nullptr);
     bool testSerialCommunicationImpl(QString* out_feedback = nullptr);
     void ensureManualOperationDialog();
+    void updateManualOperationStatus();
+    void handleManualJog(double delta_x_mm, double delta_y_mm, double delta_z_mm, const QString& action_name);
+    void resetManualJogToCenter();
+    bool sendManualJogTo(double x_mm, double y_mm, double z_mm, const QString& action_name);
+    bool sendCalibrationSquareGrid(double square_size_mm,
+                                   double spacing_mm,
+                                   int grid_count,
+                                   bool laser_output_enabled,
+                                   QString* out_error);
     void createLanguageMenu();
     void createMachiningControlWidget();
     QStringList discoverQtTranslationLocales() const;
@@ -198,6 +212,7 @@ private:
     bool validateTcpTargetForMachining(QString* out_error) const;
     bool ensureMachiningTransportConnected(QString* out_error);
     bool sendCurrentMachiningFrame(QString* out_error);
+    bool flushMachiningTransportTail(QString* out_error);
     void updateMachiningUiState();
 
     // UI组件
@@ -221,10 +236,17 @@ private:
     QMenu* connection_menu_;
     QMenu* device_board_menu_;
     QMenu* manual_menu_;
+    QMenu* calibration_menu_;
     QMenu* measure_menu_;
     QMenu* log_menu_;
     QMenu* language_menu_;
     QMenu* help_menu_;
+    QDoubleSpinBox* manual_jog_step_spin_ = nullptr;
+    QLabel* manual_jog_position_label_ = nullptr;
+    double manual_jog_x_mm_ = 0.0;
+    double manual_jog_y_mm_ = 0.0;
+    double manual_jog_z_mm_ = 0.0;
+    bool manual_jog_position_initialized_ = false;
     
     // 纹理编辑器对话框
     TextureEditorDialog* texture_editor_dialog_;
@@ -310,6 +332,7 @@ private:
         int serial_baud = 115200;
         bool enable_serial_test = false;
         bool apply_job_transform = true;
+        bool swap_yz_axes = false;
         bool dry_run_only = false;
         bool require_preexecute_comm_check = true;
         AxisMode axis_mode = AxisMode::ThreeAxis;
@@ -329,11 +352,11 @@ private:
         double b_min_mm = -32.768;
         double b_max_mm = 32.767;
         int jump_speed_mm_s = 500;
-        int laser_on_delay_us = 200;
-        int laser_off_delay_us = 25;
-        int mark_delay_us = 0;
-        int jump_delay_us = 300;
-        int polygon_delay_us = 0;
+        int laser_on_delay_us = 100;
+        int laser_off_delay_us = 580;
+        int mark_delay_us = 600;
+        int jump_delay_us = 150;
+        int polygon_delay_us = 450;
         int rtc6_card_no = 1;
         double rtc6_units_per_mm = 1000.0;
         double rtc6_mark_speed_mm_s = 300.0;
@@ -355,13 +378,14 @@ private:
     MachiningPlan machining_plan_;
     MachiningRunState machining_run_state_ = MachiningRunState::Idle;
     int machining_batch_index_ = 0;
+    size_t machining_transport_pending_bytes_ = 0;
     QSet<int> machining_completed_segment_ids_;
     bool emergency_stop_requested_ = false;
     bool machining_refresh_available_ = false;
     bool is_simulation_mode_ = false;
     bool ignore_simulation_toggle_signal_ = false;
     bool machining_laser_output_enabled_ = false;
-    bool machining_segment_feedback_enabled_ = true;
+    bool machining_segment_feedback_enabled_ = false;
     spdlog::level::level_enum machining_previous_log_level_ = spdlog::level::info;
     bool machining_log_level_overridden_ = false;
 

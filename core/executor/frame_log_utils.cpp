@@ -85,9 +85,12 @@ uint16_t clampAxisToU16(double mm_value)
     return static_cast<uint16_t>(std::llround(raw));
 }
 
-std::array<uint16_t, 8> makeDataFrame(uint16_t x, uint16_t y, uint16_t z, bool is_jump)
+std::array<uint16_t, 8> makeDataFrame(uint16_t x, uint16_t y, uint16_t z, bool is_jump, bool swap_yz_axes)
 {
     // arg1..arg8 = B, A, Z, Y, X, OPCODE, arg7, arg8
+    if (swap_yz_axes) {
+        std::swap(y, z);
+    }
     return {0, 0, z, y, x, is_jump ? kOpcodeJump : kOpcodeMark, 0, 0};
 }
 
@@ -451,9 +454,21 @@ void appendInterpolatedFrames(uint16_t x0, uint16_t y0, uint16_t z0,
                               bool mark_segment,
                               int laser_on_delay_us,
                               int* io_mark_elapsed_us,
-                              std::vector<std::array<uint16_t, 8>>& frames)
+                              std::vector<std::array<uint16_t, 8>>& frames,
+                              bool swap_yz_axes,
+                              bool laser_output_enabled)
 {
-    const int samples = computeInterpolationSamples(x0, y0, z0, x1, y1, z1, speed_mm_s);
+    const uint16_t frame_y0 = swap_yz_axes ? z0 : y0;
+    const uint16_t frame_z0 = swap_yz_axes ? y0 : z0;
+    const uint16_t frame_y1 = swap_yz_axes ? z1 : y1;
+    const uint16_t frame_z1 = swap_yz_axes ? y1 : z1;
+    const int samples = computeInterpolationSamples(x0,
+                                                     frame_y0,
+                                                     frame_z0,
+                                                     x1,
+                                                     frame_y1,
+                                                     frame_z1,
+                                                     speed_mm_s);
     int mark_elapsed_us = io_mark_elapsed_us ? *io_mark_elapsed_us : 0;
 
     for (int i = 1; i <= samples; ++i) {
@@ -461,11 +476,11 @@ void appendInterpolatedFrames(uint16_t x0, uint16_t y0, uint16_t z0,
         const uint16_t y = interpolateAxis(y0, y1, i, samples);
         const uint16_t z = interpolateAxis(z0, z1, i, samples);
         if (mark_segment) {
-            const bool is_jump = (mark_elapsed_us < laser_on_delay_us);
-            frames.push_back(makeDataFrame(x, y, z, is_jump));
+            const bool is_jump = !laser_output_enabled || (mark_elapsed_us < laser_on_delay_us);
+            frames.push_back(makeDataFrame(x, y, z, is_jump, swap_yz_axes));
             mark_elapsed_us += kDelayTickUs;
         } else {
-            frames.push_back(makeDataFrame(x, y, z, true));
+            frames.push_back(makeDataFrame(x, y, z, true, swap_yz_axes));
         }
     }
 
@@ -477,15 +492,17 @@ void appendInterpolatedFrames(uint16_t x0, uint16_t y0, uint16_t z0,
 void appendDelayFrames(uint16_t x, uint16_t y, uint16_t z,
                        int delay_us,
                        int delay_on_us,
-                       std::vector<std::array<uint16_t, 8>>& frames)
+                       std::vector<std::array<uint16_t, 8>>& frames,
+                       bool swap_yz_axes,
+                       bool laser_output_enabled)
 {
     const int safe_delay_us = (std::max)(0, delay_us);
     const int safe_delay_on_us = (std::max)(0, delay_on_us);
     const int total_ticks = safe_delay_us / kDelayTickUs;
     const int mark_ticks = (std::min)(total_ticks, safe_delay_on_us / kDelayTickUs);
     for (int i = 0; i < total_ticks; ++i) {
-        const bool is_jump = (i >= mark_ticks);
-        frames.push_back(makeDataFrame(x, y, z, is_jump));
+        const bool is_jump = !laser_output_enabled || (i >= mark_ticks);
+        frames.push_back(makeDataFrame(x, y, z, is_jump, swap_yz_axes));
     }
 }
 
@@ -533,7 +550,10 @@ void appendProcessEndFrame(std::vector<std::array<uint16_t, 8>>& frames)
     frames.push_back(makeOpcodeFrame(kOpcodeEnd));
 }
 
-void appendJobFramesWithParams(const LaserJob& job, std::vector<std::array<uint16_t, 8>>& frames)
+void appendJobFramesWithParams(const LaserJob& job,
+                               std::vector<std::array<uint16_t, 8>>& frames,
+                               bool swap_yz_axes,
+                               bool laser_output_enabled)
 {
     int active_freq = static_cast<int>(std::llround(job.process_defaults.freq_hz));
     double active_power = job.process_defaults.power_w;
@@ -572,10 +592,10 @@ void appendJobFramesWithParams(const LaserJob& job, std::vector<std::array<uint1
             const uint16_t x = mmToFrameValue(point.x);
             const uint16_t y = mmToFrameValue(point.y);
             const uint16_t z = mmToFrameValue(point.z);
-            const bool point_is_jump = (segment.type == SegmentType::JUMP) || (point.laser == 0);
+            const bool point_is_jump = (segment.type == SegmentType::JUMP) || !laser_output_enabled;
 
             if (!has_prev) {
-                frames.push_back(makeDataFrame(x, y, z, true));
+                frames.push_back(makeDataFrame(x, y, z, true, swap_yz_axes));
                 prev_x = x;
                 prev_y = y;
                 prev_z = z;
@@ -595,7 +615,9 @@ void appendJobFramesWithParams(const LaserJob& job, std::vector<std::array<uint1
                                          false,
                                          0,
                                          nullptr,
-                                         frames);
+                                         frames,
+                                         swap_yz_axes,
+                                         laser_output_enabled);
             } else {
                 const int laser_on_delay_us = resolveDelayUsFromParams(point_params, true, DataGenerator::LASER_ON_DELAY);
                 const double mark_speed = resolveSpeedMmS(point_params, segment_params ? segment_params->speed_mm_s : job.process_defaults.speed_mm_s);
@@ -609,7 +631,9 @@ void appendJobFramesWithParams(const LaserJob& job, std::vector<std::array<uint1
                                          true,
                                          laser_on_delay_us,
                                          &mark_elapsed_us,
-                                         frames);
+                                         frames,
+                                         swap_yz_axes,
+                                         laser_output_enabled);
             }
 
             prev_x = x;
@@ -619,12 +643,19 @@ void appendJobFramesWithParams(const LaserJob& job, std::vector<std::array<uint1
 
         if (has_prev) {
             if (segment.type == SegmentType::JUMP) {
-                appendDelayFrames(prev_x, prev_y, prev_z, DataGenerator::JUMP_DELAY, 0, frames);
+                appendDelayFrames(prev_x, prev_y, prev_z, DataGenerator::JUMP_DELAY, 0, frames, swap_yz_axes, false);
             } else {
                 const ProcessParams* tail_params =
                     segment.points.back().params_override ? segment.points.back().params_override.get() : segment_params;
                 const int laser_off_delay_us = resolveDelayUsFromParams(tail_params, false, DataGenerator::LASER_OFF_DELAY);
-                appendDelayFrames(prev_x, prev_y, prev_z, DataGenerator::MARK_DELAY, laser_off_delay_us, frames);
+                appendDelayFrames(prev_x,
+                                  prev_y,
+                                  prev_z,
+                                  DataGenerator::MARK_DELAY,
+                                  laser_off_delay_us,
+                                  frames,
+                                  swap_yz_axes,
+                                  laser_output_enabled);
             }
         }
     }
@@ -649,7 +680,9 @@ void writeFrameOnlyLine(std::ofstream& ofs, const std::array<uint16_t, 8>& frame
 bool exportJobFramesForDemo(const LaserJob& job,
                             const std::string& log_dir,
                             std::string* out_log_path,
-                            std::array<uint16_t, 8>* out_first_data_frame)
+                            std::array<uint16_t, 8>* out_first_data_frame,
+                            bool swap_yz_axes,
+                            bool laser_output_enabled)
 {
     if (!job.isValid() || !ensureLogDir(log_dir)) {
         return false;
@@ -669,6 +702,8 @@ bool exportJobFramesForDemo(const LaserJob& job,
     writeLogLine(ofs, "Example1 path -> frame mapping start");
     writeLogLine(ofs, "Rule: ignore freq/power/speed changes; A/B fixed to 0; only Begin/Mark/Jump/End.");
     writeLogLine(ofs, "Axis encode: encoded = clamp(round(mm * 1000 + 32768), 0, 65535).");
+    writeLogLine(ofs, std::string("Axis swap: swap_yz_axes=") + (swap_yz_axes ? "1" : "0"));
+    writeLogLine(ofs, std::string("Laser output for log=") + (laser_output_enabled ? "on" : "off"));
 
     size_t mark_count = 0;
     size_t jump_count = 0;
@@ -691,11 +726,11 @@ bool exportJobFramesForDemo(const LaserJob& job,
                 continue;
             }
 
-            const bool is_jump = (segment.type == SegmentType::JUMP) || (point.laser == 0);
+            const bool is_jump = (segment.type == SegmentType::JUMP) || !laser_output_enabled;
             const uint16_t x = clampAxisToU16(point.x);
             const uint16_t y = clampAxisToU16(point.y);
             const uint16_t z = clampAxisToU16(point.z);
-            const auto frame = makeDataFrame(x, y, z, is_jump);
+            const auto frame = makeDataFrame(x, y, z, is_jump, swap_yz_axes);
 
             if (has_prev_frame && frame == prev_frame) {
                 ++skipped_duplicate_count;
@@ -714,6 +749,7 @@ bool exportJobFramesForDemo(const LaserJob& job,
                  << " xyz=(" << std::fixed << std::setprecision(4)
                  << point.x << ", " << point.y << ", " << point.z << ")"
                  << " uv=(" << point.u << ", " << point.v << ")"
+                 << " frame_axis_yz=(" << (swap_yz_axes ? z : y) << ", " << (swap_yz_axes ? y : z) << ")"
                  << " frame=" << formatFrame(frame);
             writeLogLine(ofs, line.str());
 
@@ -988,14 +1024,16 @@ bool exportConnectionFrameLog(const LaserJob& job,
                               bool serial_enabled,
                               bool serial_ok,
                               const std::string& serial_feedback,
-                              std::string* out_log_path)
+                              std::string* out_log_path,
+                              bool swap_yz_axes,
+                              bool laser_output_enabled)
 {
     if (!job.isValid() || !ensureLogDir(log_dir)) {
         return false;
     }
 
     const std::filesystem::path log_path =
-        std::filesystem::path(log_dir) / ("connect_frame_dump_" + nowFileStamp() + ".log");
+        std::filesystem::path(log_dir) / ("connection_frame_dump_" + nowFileStamp() + ".log");
     std::ofstream ofs(log_path.string(), std::ios::out | std::ios::trunc);
     if (!ofs.is_open()) {
         return false;
@@ -1014,10 +1052,12 @@ bool exportConnectionFrameLog(const LaserJob& job,
     ofs << "# serial enabled=" << (serial_enabled ? "1" : "0")
         << " ok=" << (serial_ok ? "1" : "0")
         << " feedback=" << serial_feedback << "\n";
+    ofs << "# swap_yz_axes=" << (swap_yz_axes ? "1" : "0") << "\n";
+    ofs << "# laser_output=" << (laser_output_enabled ? "on" : "off") << "\n";
 
     std::vector<std::array<uint16_t, 8>> frames;
     frames.reserve(job.getTotalPointCount() + 64);
-    appendJobFramesWithParams(job, frames);
+    appendJobFramesWithParams(job, frames, swap_yz_axes, laser_output_enabled);
     for (const auto& frame : frames) {
         writeFrameOnlyLine(ofs, frame);
     }

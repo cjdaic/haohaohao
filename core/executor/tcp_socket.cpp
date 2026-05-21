@@ -131,7 +131,9 @@ void TcpSocket::socketThread(DataBuffer* buffer,
                     updateLastFeedback(recv_feedback + ", sent " + std::to_string(totalSent) +
                                        " bytes, post recv none");
                 } else {
-                    throw std::runtime_error("接收失败, code=" + std::to_string(WSAGetLastError()));
+                    const int err = WSAGetLastError();
+                    updateLastFeedback(recv_feedback + ", sent " + std::to_string(totalSent) +
+                                       " bytes, post recv error code=" + std::to_string(err));
                 }
                 buffer->readEnd(rd_ptr);
                 continue;

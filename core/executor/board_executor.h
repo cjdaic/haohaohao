@@ -52,6 +52,7 @@ public:
         DelayConfig delay;
         AxisMode axis_mode = AxisMode::ThreeAxis;
         bool apply_job_transform = true;
+        bool swap_yz_axes = false;
         bool dry_run_only = true;
         bool live_laser_enabled = false;
         bool mask_laser_output = false;
@@ -128,6 +129,7 @@ private:
                            uint16_t* out_value,
                            std::string* out_error);
     bool transformCoordinates(double& x, double& y, double& z, const std::vector<double>& transform) const;
+    void applyAxisSwapIfNeeded(double& y, double& z) const;
 };
 
 } // namespace nbcam

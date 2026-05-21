@@ -97,6 +97,7 @@ private:
     std::thread tcp_thread_;
     std::atomic<bool> tcp_thread_running_{false};
     std::atomic<bool> tcp_connected_{false};
+    std::atomic<int> in_flight_read_buffers_{0};
     TcpSocket::Config transport_config_;
     
     void addData(uint16_t arg1 = 0, uint16_t arg2 = 0, uint16_t arg3 = 0,
