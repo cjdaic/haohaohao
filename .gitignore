@@ -63,6 +63,10 @@ ChiikawaLaser-SetupFiles/
 # Generated machining jobs can exceed GitHub's file size limits
 job/*.dcj
 
+# Local documentation and notes
+docs/
+reference/
+
 # OS
 .DS_Store
 Thumbs.db
