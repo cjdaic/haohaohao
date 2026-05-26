@@ -259,7 +259,7 @@ void printCliHelp(QTextStream& out)
     out << "  ls [path] / dir [path]" << Qt::endl;
     out << "  load_model <path>" << Qt::endl;
     out << "  parameterize [LSCM|ARAP|AUTHALIC]" << Qt::endl;
-    out << "  import_svg <path> [tile_u] [tile_v]" << Qt::endl;
+    out << "  import_svg <path> [tile_u tile_v]" << Qt::endl;
     out << "  generate_pattern <strategy> <spacing_mm> [angle_deg]" << Qt::endl;
     out << "  map_to_xyz" << Qt::endl;
     out << "  assign_params [curvature]" << Qt::endl;
@@ -277,7 +277,7 @@ void printCliHelp(QTextStream& out)
     out << "Typical workflow:" << Qt::endl;
     out << "  load_model \"docs/model1111.STL\"" << Qt::endl;
     out << "  parameterize LSCM" << Qt::endl;
-    out << "  import_svg \"docs/HUST.svg\" 0.05 0.05" << Qt::endl;
+    out << "  import_svg \"docs/HUST.svg\"" << Qt::endl;
     out << "  map_to_xyz" << Qt::endl;
     out << "  assign_params curvature" << Qt::endl;
     out << "  plan_path" << Qt::endl;
@@ -439,12 +439,16 @@ int runCliMode()
 
         if (command == "import_svg") {
             if (args.isEmpty() || args.size() > 3) {
-                out << "Usage: import_svg <path> [tile_u] [tile_v]" << Qt::endl;
+                out << "Usage: import_svg <path> [tile_u tile_v]" << Qt::endl;
                 continue;
             }
             const QString path = resolveCliPath(args.at(0));
-            double tile_u = 0.05;
-            double tile_v = 0.05;
+            double tile_u = 0.0;
+            double tile_v = 0.0;
+            if (args.size() == 2) {
+                out << "Usage: import_svg <path> [tile_u tile_v]" << Qt::endl;
+                continue;
+            }
             if (args.size() >= 2 && !parseCliDouble(args.at(1), &tile_u)) {
                 out << "Invalid tile_u: " << args.at(1) << Qt::endl;
                 continue;
@@ -453,7 +457,10 @@ int runCliMode()
                 out << "Invalid tile_v: " << args.at(2) << Qt::endl;
                 continue;
             }
-            out << (controller.importSVGWithTiling(path.toStdString(), tile_u, tile_v, {}) ? "OK " : "FAIL ")
+            const bool imported = (args.size() >= 3)
+                ? controller.importSVGWithTiling(path.toStdString(), tile_u, tile_v, {})
+                : controller.importSVG(path.toStdString(), 0.5, 0.5, 0.9);
+            out << (imported ? "OK " : "FAIL ")
                 << "import_svg " << path << Qt::endl;
             continue;
         }

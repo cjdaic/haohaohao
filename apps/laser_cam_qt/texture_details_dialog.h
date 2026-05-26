@@ -33,6 +33,7 @@ private:
     QLabel* translate_label_;
     QLabel* rotation_label_;
     QLabel* prewarp_label_;
+    QLabel* grayscale_label_;
     QLabel* contour_info_label_;
 };
 

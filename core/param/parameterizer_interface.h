@@ -8,6 +8,7 @@ namespace nbcam {
 // UV坐标
 struct UVCoord {
     double u, v;
+    double grayscale = 0.0;  // 预留：纹理灰度强度 [0,1]
 };
 
 // 参数化结果

@@ -66,6 +66,10 @@ TextureDetailsDialog::TextureDetailsDialog(QWidget *parent)
     prewarp_label_ = new QLabel(this);
     transform_layout->addRow("逆向预扭曲:", prewarp_label_);
 
+    grayscale_label_ = new QLabel(this);
+    grayscale_label_->setWordWrap(true);
+    transform_layout->addRow("灰度加工:", grayscale_label_);
+
     contour_info_label_ = new QLabel(this);
     contour_info_label_->setWordWrap(true);
     transform_layout->addRow("轮廓信息:", contour_info_label_);
@@ -102,6 +106,12 @@ void TextureDetailsDialog::setTextureInfo(int patch_id, const TextureInfo& info)
     prewarp_label_->setText(QString("%1, 强度=%2")
                                 .arg(info.enable_inverse_stretch_prewarp ? "启用" : "关闭")
                                 .arg(info.inverse_stretch_prewarp_strength, 0, 'f', 2));
+    grayscale_label_->setText(QString("%1, 功率预留=%2, P=[%3,%4]W, gamma=%5")
+                                  .arg(info.grayscale_converted ? "已灰度化" : "未灰度化")
+                                  .arg(info.grayscale_power_reserved ? "已启用" : "未启用")
+                                  .arg(info.grayscale_power_min_w, 0, 'f', 2)
+                                  .arg(info.grayscale_power_max_w, 0, 'f', 2)
+                                  .arg(info.grayscale_gamma, 0, 'f', 2));
     contour_info_label_->setText(
         QString("轮廓回路=%1, 轮廓段(MARK)=%2, 跳转段(JUMP)=%3, 轮廓点数=%4, 路径保存=%5")
             .arg(info.contour_loop_count)

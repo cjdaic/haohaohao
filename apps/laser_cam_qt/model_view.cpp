@@ -812,6 +812,7 @@ void ModelView::createPathActor(nbcam::LaserJob* job)
     if (!job || job->segments.empty()) {
         return;
     }
+    const bool use_grayscale = job->grayscale_enabled;
 
     vtkPoints* points = vtkPoints::New();
     vtkCellArray* lines = vtkCellArray::New();
@@ -904,6 +905,13 @@ void ModelView::createPathActor(nbcam::LaserJob* job)
         const double by = tip.y - uy * head_len - sy * head_width;
         const double bz = tip.z - uz * head_len - sz * head_width;
 
+        auto grayscaleToRgb = [](double gray01) -> std::array<unsigned char, 3> {
+            const int gray = static_cast<int>(std::clamp(gray01 * 255.0, 0.0, 255.0));
+            return {static_cast<unsigned char>(gray),
+                    static_cast<unsigned char>(gray),
+                    static_cast<unsigned char>(gray)};
+        };
+
         unsigned char base_r = 220;
         unsigned char base_g = 20;
         unsigned char base_b = 20;
@@ -917,6 +925,11 @@ void ModelView::createPathActor(nbcam::LaserJob* job)
             highlight_r = 45;
             highlight_g = 115;
             highlight_b = 255;
+        } else if (use_grayscale) {
+            const auto rgb = grayscaleToRgb(tip.grayscale);
+            base_r = rgb[0];
+            base_g = rgb[1];
+            base_b = rgb[2];
         } else if (is_contour) {
             base_r = 255;
             base_g = 140;
@@ -965,6 +978,13 @@ void ModelView::createPathActor(nbcam::LaserJob* job)
         const bool is_contour = (segment.strategy == nbcam::FillStrategy::CONTOUR);
         const bool is_highlighted = highlighted_segment_ids_.find(segment.id) != highlighted_segment_ids_.end();
 
+        const auto grayscaleToRgb = [](double gray01) -> std::array<unsigned char, 3> {
+            const int gray = static_cast<int>(std::clamp(gray01 * 255.0, 0.0, 255.0));
+            return {static_cast<unsigned char>(gray),
+                    static_cast<unsigned char>(gray),
+                    static_cast<unsigned char>(gray)};
+        };
+
         unsigned char base_r = 220;
         unsigned char base_g = 20;
         unsigned char base_b = 20;
@@ -978,6 +998,12 @@ void ModelView::createPathActor(nbcam::LaserJob* job)
             highlight_r = 45;
             highlight_g = 115;
             highlight_b = 255;
+        } else if (use_grayscale) {
+            const double gray01 = segment.points.empty() ? 0.0 : segment.points.back().grayscale;
+            const auto rgb = grayscaleToRgb(gray01);
+            base_r = rgb[0];
+            base_g = rgb[1];
+            base_b = rgb[2];
         } else if (is_contour) {
             base_r = 255;
             base_g = 140;
@@ -997,10 +1023,20 @@ void ModelView::createPathActor(nbcam::LaserJob* job)
                 line->GetPointIds()->SetId(1, ids[i + 1]);
                 lines->InsertNextCell(line);
                 line->Delete();
+                unsigned char line_r = base_r;
+                unsigned char line_g = base_g;
+                unsigned char line_b = base_b;
+                if (use_grayscale) {
+                    const double gray01 = (segment.points[i].grayscale + segment.points[i + 1].grayscale) * 0.5;
+                    const auto rgb = grayscaleToRgb(gray01);
+                    line_r = rgb[0];
+                    line_g = rgb[1];
+                    line_b = rgb[2];
+                }
                 appendCellColor(segment.id,
-                                base_r,
-                                base_g,
-                                base_b,
+                                line_r,
+                                line_g,
+                                line_b,
                                 highlight_r,
                                 highlight_g,
                                 highlight_b,
@@ -2700,7 +2736,8 @@ void ModelView::applyTextureToPatch(int patch_id, const std::string& svg_filepat
         const int raster_h = raster_size.second;
 
         QImage svg_image;
-        if (!loadSvgImageCached(svg_filepath, raster_w, raster_h, svg_image) || svg_image.isNull()) {
+        if (!loadSvgImageCached(svg_filepath, raster_w, raster_h, svg_image,
+                                SvgRasterColorMode::Grayscale) || svg_image.isNull()) {
             spdlog::error("SVG渲染失败");
             return;
         }

@@ -790,6 +790,7 @@ std::vector<nbcam::UVPathPoint> densifyUVPathSegments(const std::vector<nbcam::U
                     nbcam::UVPathPoint mid;
                     mid.u = a.u + dx * t;
                     mid.v = a.v + dy * t;
+                    mid.grayscale = a.grayscale * (1.0 - t) + b.grayscale * t;
                     mid.is_jump_before = false;
                     mid.is_arrow_tip = false;
                     dense.push_back(mid);
@@ -1267,7 +1268,11 @@ std::vector<std::vector<nbcam::SVGPathPoint>> extractSvgBoundaryLoopsFromShapes(
             if (!std::isfinite(pt.x) || !std::isfinite(pt.y)) {
                 continue;
             }
-            loop.push_back(nbcam::SVGPathPoint{pt.x, pt.y, i == 0});
+            nbcam::SVGPathPoint svg_pt;
+            svg_pt.x = pt.x;
+            svg_pt.y = pt.y;
+            svg_pt.is_move_to = (i == 0);
+            loop.push_back(svg_pt);
         }
         if (loop.size() >= 3) {
             svg_boundary_loops.push_back(std::move(loop));
@@ -1298,7 +1303,12 @@ std::vector<std::vector<nbcam::SVGPathPoint>> collectRawSvgLoops(const std::vect
                 if (!std::isfinite(p.x) || !std::isfinite(p.y)) {
                     continue;
                 }
-                raw_loop.push_back(nbcam::SVGPathPoint{p.x, p.y, i == 0});
+                nbcam::SVGPathPoint svg_pt;
+                svg_pt.x = p.x;
+                svg_pt.y = p.y;
+                svg_pt.grayscale = p.grayscale;
+                svg_pt.is_move_to = (i == 0);
+                raw_loop.push_back(svg_pt);
             }
             if (raw_loop.size() >= 3) {
                 loops.push_back(std::move(raw_loop));
@@ -1880,17 +1890,37 @@ nbcam::PathPoint clonePathPointWithLaser(const nbcam::PathPoint& src, int laser_
     dst.a = src.a;
     dst.b = src.b;
     dst.laser = (laser_override >= 0) ? laser_override : src.laser;
+    dst.grayscale = src.grayscale;
     if (src.params_override) {
         dst.params_override = std::make_unique<nbcam::ProcessParams>(*src.params_override);
     }
     return dst;
 }
 
+double sampleSvgPointGrayscale(double uv_u,
+                               double uv_v,
+                               const ApplicationController::PatternPlanOptions& options,
+                               double patch_u_min,
+                               double patch_u_max,
+                               double patch_v_min,
+                               double patch_v_max,
+                               const std::vector<unsigned char>& rgba,
+                               int mask_w,
+                               int mask_h);
+
 bool buildContourMarkPathOnPatch(const std::vector<nbcam::UVCoord>& contour_uv,
                                  double densify_step,
                                  const nbcam::TriangleMesh& mesh,
                                  const std::vector<nbcam::UVCoord>& uv_coords,
                                  const std::vector<size_t>& patch_triangle_indices,
+                                 const ApplicationController::PatternPlanOptions& options,
+                                 double patch_u_min,
+                                 double patch_u_max,
+                                 double patch_v_min,
+                                 double patch_v_max,
+                                 const std::vector<unsigned char>& rgba_mask,
+                                 int mask_w,
+                                 int mask_h,
                                  std::vector<nbcam::UVPathPoint>& contour_uv_out,
                                  std::vector<nbcam::PathPoint>& contour_xyz_out)
 {
@@ -1958,13 +1988,23 @@ bool buildContourMarkPathOnPatch(const std::vector<nbcam::UVCoord>& contour_uv,
     }
 
     contour_uv_out = contour_path;
+    for (auto& uv : contour_uv_out) {
+        uv.grayscale = sampleSvgPointGrayscale(uv.u, uv.v, options,
+                                               patch_u_min, patch_u_max, patch_v_min, patch_v_max,
+                                               rgba_mask, mask_w, mask_h);
+    }
     contour_xyz_out.reserve(mapped.size());
-    for (const auto& p : mapped) {
+    for (size_t i = 0; i < mapped.size(); ++i) {
+        const auto& p = mapped[i];
         if (p.laser == 0 ||
             !std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) {
             return false;
         }
-        contour_xyz_out.push_back(clonePathPointWithLaser(p, 1));
+        nbcam::PathPoint point = clonePathPointWithLaser(p, 1);
+        if (i < contour_uv_out.size()) {
+            point.grayscale = contour_uv_out[i].grayscale;
+        }
+        contour_xyz_out.push_back(std::move(point));
     }
 
     return contour_xyz_out.size() >= 2;
@@ -2141,17 +2181,59 @@ double sampleSvgMaskAlphaBilinear(const std::vector<unsigned char>& rgba,
     return a0 * (1.0 - ty) + a1 * ty;
 }
 
-bool isUvPointInsideSvgMask(const nbcam::UVPathPoint& uv_pt,
-                            const ApplicationController::PatternPlanOptions& options,
-                            double patch_u_min,
-                            double patch_u_max,
-                            double patch_v_min,
-                            double patch_v_max,
-                            const std::vector<unsigned char>& rgba,
-                            int mask_w,
-                            int mask_h)
+double sampleSvgMaskGrayBilinear(const std::vector<unsigned char>& rgba,
+                                 int mask_w,
+                                 int mask_h,
+                                 double u_norm,
+                                 double v_norm)
 {
-    if (rgba.empty() || mask_w <= 1 || mask_h <= 1) {
+    if (rgba.empty() || mask_w <= 0 || mask_h <= 0 || !std::isfinite(u_norm) || !std::isfinite(v_norm)) {
+        return 0.0;
+    }
+
+    const double x = std::clamp(u_norm, 0.0, 1.0) * static_cast<double>(mask_w - 1);
+    const double y = std::clamp(v_norm, 0.0, 1.0) * static_cast<double>(mask_h - 1);
+    const int x0 = std::clamp(static_cast<int>(std::floor(x)), 0, mask_w - 1);
+    const int y0 = std::clamp(static_cast<int>(std::floor(y)), 0, mask_h - 1);
+    const int x1 = std::min(x0 + 1, mask_w - 1);
+    const int y1 = std::min(y0 + 1, mask_h - 1);
+    const double tx = x - static_cast<double>(x0);
+    const double ty = y - static_cast<double>(y0);
+
+    const auto grayAt = [&](int px, int py) -> double {
+        const size_t idx = (static_cast<size_t>(py) * static_cast<size_t>(mask_w) + static_cast<size_t>(px)) * 4;
+        if (idx + 3 >= rgba.size()) {
+            return 0.0;
+        }
+        const double r = static_cast<double>(rgba[idx + 0]);
+        const double g = static_cast<double>(rgba[idx + 1]);
+        const double b = static_cast<double>(rgba[idx + 2]);
+        const double alpha = static_cast<double>(rgba[idx + 3]) / 255.0;
+        return (0.299 * r + 0.587 * g + 0.114 * b) * alpha;
+    };
+
+    const double g00 = grayAt(x0, y0);
+    const double g10 = grayAt(x1, y0);
+    const double g01 = grayAt(x0, y1);
+    const double g11 = grayAt(x1, y1);
+    const double g0 = g00 * (1.0 - tx) + g10 * tx;
+    const double g1 = g01 * (1.0 - tx) + g11 * tx;
+    return g0 * (1.0 - ty) + g1 * ty;
+}
+
+bool mapUvPointToSvgMaskNorm(double uv_u,
+                             double uv_v,
+                             const ApplicationController::PatternPlanOptions& options,
+                             double patch_u_min,
+                             double patch_u_max,
+                             double patch_v_min,
+                             double patch_v_max,
+                             int mask_w,
+                             int mask_h,
+                             double& u_norm,
+                             double& v_norm)
+{
+    if (mask_w <= 1 || mask_h <= 1) {
         return false;
     }
 
@@ -2174,8 +2256,8 @@ bool isUvPointInsideSvgMask(const nbcam::UVPathPoint& uv_pt,
     const double cos_r = std::cos(options.tex_rotation_deg * M_PI / 180.0);
     const double sin_r = std::sin(options.tex_rotation_deg * M_PI / 180.0);
 
-    const double u_rel = uv_pt.u - center_u;
-    const double v_rel = uv_pt.v - center_v;
+    const double u_rel = uv_u - center_u;
+    const double v_rel = uv_v - center_v;
     const double u_scaled = u_rel * sx;
     const double v_scaled = v_rel * sy;
     const double u_rot = u_scaled * cos_r - v_scaled * sin_r;
@@ -2186,12 +2268,81 @@ bool isUvPointInsideSvgMask(const nbcam::UVPathPoint& uv_pt,
         return false;
     }
 
-    const double u_norm = (u_transformed - fit_frame.u_min) / fit_frame.u_range;
-    const double v_norm = (v_transformed - fit_frame.v_min) / fit_frame.v_range;
+    u_norm = (u_transformed - fit_frame.u_min) / fit_frame.u_range;
+    v_norm = (v_transformed - fit_frame.v_min) / fit_frame.v_range;
     if (!std::isfinite(u_norm) || !std::isfinite(v_norm)) {
         return false;
     }
     if (u_norm < 0.0 || u_norm > 1.0 || v_norm < 0.0 || v_norm > 1.0) {
+        return false;
+    }
+
+    return true;
+}
+
+double sampleSvgPointGrayscale(double uv_u,
+                               double uv_v,
+                               const ApplicationController::PatternPlanOptions& options,
+                               double patch_u_min,
+                               double patch_u_max,
+                               double patch_v_min,
+                               double patch_v_max,
+                               const std::vector<unsigned char>& rgba,
+                               int mask_w,
+                               int mask_h)
+{
+    double u_norm = 0.0;
+    double v_norm = 0.0;
+    if (!mapUvPointToSvgMaskNorm(uv_u, uv_v, options,
+                                 patch_u_min, patch_u_max, patch_v_min, patch_v_max,
+                                 mask_w, mask_h,
+                                 u_norm, v_norm)) {
+        return 0.0;
+    }
+    return std::clamp(sampleSvgMaskGrayBilinear(rgba, mask_w, mask_h, u_norm, v_norm) / 255.0, 0.0, 1.0);
+}
+
+template <typename PathPointT>
+void applySvgGrayscaleToPath(std::vector<PathPointT>& path,
+                             const ApplicationController::PatternPlanOptions& options,
+                             double patch_u_min,
+                             double patch_u_max,
+                             double patch_v_min,
+                             double patch_v_max,
+                             const std::vector<unsigned char>& rgba,
+                             int mask_w,
+                             int mask_h)
+{
+    if (path.empty() || rgba.empty()) {
+        return;
+    }
+    for (auto& pt : path) {
+        pt.grayscale = sampleSvgPointGrayscale(pt.u, pt.v, options,
+                                               patch_u_min, patch_u_max, patch_v_min, patch_v_max,
+                                               rgba, mask_w, mask_h);
+    }
+}
+
+bool isUvPointInsideSvgMask(const nbcam::UVPathPoint& uv_pt,
+                            const ApplicationController::PatternPlanOptions& options,
+                            double patch_u_min,
+                            double patch_u_max,
+                            double patch_v_min,
+                            double patch_v_max,
+                            const std::vector<unsigned char>& rgba,
+                            int mask_w,
+                            int mask_h)
+{
+    if (rgba.empty() || mask_w <= 1 || mask_h <= 1) {
+        return false;
+    }
+
+    double u_norm = 0.0;
+    double v_norm = 0.0;
+    if (!mapUvPointToSvgMaskNorm(uv_pt.u, uv_pt.v, options,
+                                 patch_u_min, patch_u_max, patch_v_min, patch_v_max,
+                                 mask_w, mask_h,
+                                 u_norm, v_norm)) {
         return false;
     }
 
@@ -2259,6 +2410,9 @@ void clipPathBySvgMask(std::vector<nbcam::UVPathPoint>& uv_path,
 
     uv_path = std::move(filtered_path);
     break_flags = std::move(filtered_breaks);
+    applySvgGrayscaleToPath(uv_path, options,
+                            patch_u_min, patch_u_max, patch_v_min, patch_v_max,
+                            rgba, mask_w, mask_h);
 }
 
 double interpolatePercentile(const std::vector<double>& sorted_values, double p)
@@ -2655,6 +2809,8 @@ bool generateArcHatchPathFromSvgMask(const nbcam::Patch& patch,
                                      : static_cast<double>(s) / static_cast<double>(segment_samples - 1);
                 const double theta = theta_start + (theta_end - theta_start) * t;
                 const double u_norm = std::clamp((theta - theta_min) / theta_range, 0.0, 1.0);
+                const double grayscale = std::clamp(sampleSvgMaskGrayBilinear(rgba, mask_w, mask_h, u_norm, v_norm) / 255.0,
+                                                    0.0, 1.0);
 
                 nbcam::PathPoint p;
                 p.u = u_norm;
@@ -2668,6 +2824,7 @@ bool generateArcHatchPathFromSvgMask(const nbcam::Patch& patch,
                     p.z = center_axis2 + radius * std::cos(theta);
                 }
                 p.laser = 1;
+                p.grayscale = grayscale;
 
                 const bool break_before = (s == 0) && !xyz_path_out.empty();
                 xyz_path_out.push_back(std::move(p));
@@ -2676,6 +2833,7 @@ bool generateArcHatchPathFromSvgMask(const nbcam::Patch& patch,
                 nbcam::UVPathPoint uvp;
                 uvp.u = u_norm;
                 uvp.v = v_norm;
+                uvp.grayscale = grayscale;
                 uvp.is_jump_before = break_before;
                 uvp.is_arrow_tip = (s == segment_samples - 1);
                 uv_path_out.push_back(uvp);
@@ -3001,6 +3159,7 @@ void clipLayerPathBySvgMask(std::vector<nbcam::UVPathPoint>& uv_path,
         dst.a = src.a;
         dst.b = src.b;
         dst.laser = src.laser;
+        dst.grayscale = src.grayscale;
         if (src.params_override) {
             dst.params_override = std::make_unique<nbcam::ProcessParams>(*src.params_override);
         }
@@ -3225,6 +3384,12 @@ bool generateZLayerContourPath(const nbcam::Patch& patch,
         clipLayerPathBySvgMask(uv_path_out, xyz_path_out, break_flags_out,
                                options, patch_u_min, patch_u_max, patch_v_min, patch_v_max,
                                rgba_mask, mask_w, mask_h);
+        applySvgGrayscaleToPath(uv_path_out, options,
+                                patch_u_min, patch_u_max, patch_v_min, patch_v_max,
+                                rgba_mask, mask_w, mask_h);
+        applySvgGrayscaleToPath(xyz_path_out, options,
+                                patch_u_min, patch_u_max, patch_v_min, patch_v_max,
+                                rgba_mask, mask_w, mask_h);
     }
 
     return !uv_path_out.empty() && !xyz_path_out.empty();
@@ -3241,6 +3406,7 @@ nbcam::PathPoint clonePathPoint(const nbcam::PathPoint& src)
     dst.a = src.a;
     dst.b = src.b;
     dst.laser = src.laser;
+    dst.grayscale = src.grayscale;
     if (src.params_override) {
         dst.params_override = std::make_unique<nbcam::ProcessParams>(*src.params_override);
     }
@@ -3408,6 +3574,7 @@ void ApplicationController::resetProcessingStateKeepMeshInternal(bool emit_job_r
     current_strategy_name_ = "line_hatch";
     arc_scan_speed_mm_s_ = -1.0;
     arc_path_prebaked_ = false;
+    current_path_uses_grayscale_ = false;
     planned_spacing_hint_mm_ = -1.0;
     if (current_job_) {
         current_job_->clear();
@@ -3737,6 +3904,7 @@ bool ApplicationController::generatePattern(const std::string& strategy, double 
         current_strategy_name_ = normalized_strategy;
         arc_scan_speed_mm_s_ = -1.0;
         arc_path_prebaked_ = false;
+        current_path_uses_grayscale_ = false;
 
         std::vector<nbcam::UVCoord> boundary;
         if (!svg_boundary_.empty()) {
@@ -3806,9 +3974,17 @@ bool ApplicationController::importSVG(const std::string& filepath, double center
 
         nbcam::SVGToUVMapper uv_mapper;
         uv_path_.clear();
+        xyz_path_.clear();
         path_break_flags_.clear();
         pattern_patch_id_ = -1;
+        current_fill_strategy_ = nbcam::FillStrategy::CONTOUR;
+        current_strategy_name_ = "svg_import";
+        arc_scan_speed_mm_s_ = -1.0;
+        arc_path_prebaked_ = false;
+        planned_spacing_hint_mm_ = -1.0;
+        current_path_uses_grayscale_ = false;
         uv_mapper.mapToUV(svg_points, uv_path_, center_u, center_v, scale, true);
+        current_path_uses_grayscale_ = !uv_path_.empty();
 
         svg_boundary_.clear();
         svg_boundary_.reserve(uv_path_.size());
@@ -3884,9 +4060,17 @@ bool ApplicationController::importSVGWithTiling(const std::string& filepath,
 
         nbcam::SVGToUVMapper uv_mapper;
         uv_path_.clear();
+        xyz_path_.clear();
         path_break_flags_.clear();
         pattern_patch_id_ = -1;
+        current_fill_strategy_ = nbcam::FillStrategy::CONTOUR;
+        current_strategy_name_ = "svg_import";
+        arc_scan_speed_mm_s_ = -1.0;
+        arc_path_prebaked_ = false;
+        planned_spacing_hint_mm_ = -1.0;
+        current_path_uses_grayscale_ = false;
         uv_mapper.tileToUV(svg_points, uv_path_, tile_u, tile_v, actual_uv_bounds);
+        current_path_uses_grayscale_ = !uv_path_.empty();
 
         svg_boundary_.clear();
         if (actual_uv_bounds.size() >= 4) {
@@ -3963,6 +4147,7 @@ bool ApplicationController::mapToXYZ(const std::vector<size_t>* patch_triangle_i
                 break_before = true;
             }
 
+            point.grayscale = std::clamp(uv_path_[i].grayscale, 0.0, 1.0);
             filtered_break_flags.push_back(break_before);
             filtered_path.push_back(std::move(point));
             pending_break = false;
@@ -4083,9 +4268,11 @@ bool ApplicationController::planPath()
             point.a = curr.a;
             point.b = curr.b;
             point.laser = 1;
+            point.grayscale = std::clamp(curr.grayscale, 0.0, 1.0);
 
             if (curr.params_override) {
                 point.params_override = std::make_unique<nbcam::ProcessParams>(*curr.params_override);
+                point.params_override->grayscale = point.grayscale;
             }
 
             current_segment->points.push_back(std::move(point));
@@ -4105,6 +4292,12 @@ bool ApplicationController::planPath()
             emit jobReady(false);
             return false;
         }
+
+        current_job_->grayscale_enabled = current_path_uses_grayscale_;
+        current_job_->grayscale_power_min_w = 0.0;
+        current_job_->grayscale_power_max_w = 100.0;
+        current_job_->grayscale_gamma = 1.0;
+        current_job_->grayscale_source = "svg_luminance";
 
         if (current_strategy_name_ == "arc_hatch" && !arc_path_prebaked_) {
             resampleJobSegmentsToConvexArc(*current_job_,
@@ -4571,6 +4764,10 @@ bool ApplicationController::generatePatternInPatch(int patch_id,
                                                  *current_mesh_,
                                                  uv_coords_,
                                                  patch.triangle_indices,
+                                                 options,
+                                                 patch_u_min, patch_u_max, patch_v_min, patch_v_max,
+                                                 svg_mask_rgba,
+                                                 svg_mask_w, svg_mask_h,
                                                  contour_uv_path,
                                                  contour_xyz_path)) {
                     continue;
@@ -4629,6 +4826,13 @@ bool ApplicationController::generatePatternInPatch(int patch_id,
                 return false;
             }
 
+            current_path_uses_grayscale_ = !svg_mask_rgba.empty();
+            current_job_->grayscale_enabled = current_path_uses_grayscale_;
+            current_job_->grayscale_power_min_w = 0.0;
+            current_job_->grayscale_power_max_w = 100.0;
+            current_job_->grayscale_gamma = 1.0;
+            current_job_->grayscale_source = "svg_luminance";
+
             planned_spacing_hint_mm_ = options.spacing;
             pattern_patch_id_ = patch_id;
             emit jobReady(true);
@@ -4663,6 +4867,7 @@ bool ApplicationController::generatePatternInPatch(int patch_id,
             arc_center_x_ = used_center_x;
             arc_center_z_ = used_center_axis2;
             arc_radius_ = used_radius;
+            current_path_uses_grayscale_ = !svg_mask_rgba.empty();
             spdlog::info("GeneratePatternInPatch: arc_hatch generated directly on arc surface, center=({}, {}, row-axis-auto), R={}, spacing={}",
                          used_center_x,
                          used_center_axis2,
@@ -4705,6 +4910,8 @@ bool ApplicationController::generatePatternInPatch(int patch_id,
                 emit patternGenerated(false);
                 return false;
             }
+
+            current_path_uses_grayscale_ = apply_svg_mask;
 
             if (!assignProcessParams("curvature")) {
                 spdlog::warn("GeneratePatternInPatch: assignProcessParams failed, continue with defaults");
@@ -4781,6 +4988,13 @@ bool ApplicationController::generatePatternInPatch(int patch_id,
                          before_mask, uv_path_.size());
         }
 
+        if (!uv_path_.empty() && !svg_mask_rgba.empty()) {
+            applySvgGrayscaleToPath(uv_path_, options,
+                                    patch_u_min, patch_u_max, patch_v_min, patch_v_max,
+                                    svg_mask_rgba, svg_mask_w, svg_mask_h);
+            current_path_uses_grayscale_ = true;
+        }
+
         if (enable_inverse_stretch_prewarp && !inverse_stretch_samples.empty() && !uv_path_.empty()) {
             const size_t before_prewarp = uv_path_.size();
             applyInverseStretchPrewarpPath(uv_path_,
@@ -4799,6 +5013,11 @@ bool ApplicationController::generatePatternInPatch(int patch_id,
             path_break_flags_.resize(uv_path_.size());
             for (size_t i = 0; i < uv_path_.size(); ++i) {
                 path_break_flags_[i] = uv_path_[i].is_jump_before;
+            }
+            if (!svg_mask_rgba.empty()) {
+                applySvgGrayscaleToPath(uv_path_, options,
+                                        patch_u_min, patch_u_max, patch_v_min, patch_v_max,
+                                        svg_mask_rgba, svg_mask_w, svg_mask_h);
             }
             spdlog::info("GeneratePatternInPatch: inverse-stretch prewarp applied to UV path, points={} -> {}",
                          before_prewarp,

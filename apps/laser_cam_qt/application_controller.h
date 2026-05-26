@@ -195,6 +195,7 @@ private:
     double arc_radius_ = 20.0;
     double arc_scan_speed_mm_s_ = -1.0;
     bool arc_path_prebaked_ = false;
+    bool current_path_uses_grayscale_ = false;
 };
 
 #endif // APPLICATION_CONTROLLER_H

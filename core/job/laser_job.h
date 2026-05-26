@@ -14,6 +14,7 @@ struct ProcessParams {
     double speed_mm_s = 300.0;       // 速度 (mm/s)
     int64_t laser_on_delay_us = 0;   // 激光开启延时 (微秒)
     int64_t laser_off_delay_us = 0;  // 激光关闭延时 (微秒)
+    double grayscale = 0.0;          // 预留：灰度输入 [0,1]
 };
 
 // 路径点
@@ -33,6 +34,9 @@ struct PathPoint {
     
     // 激光状态
     int laser = 0;  // 0=关闭, 1=开启
+
+    // 预留：纹理灰度强度 [0,1]
+    double grayscale = 0.0;
     
     // 工艺参数（可选，点级覆盖）
     std::unique_ptr<ProcessParams> params_override;
@@ -123,6 +127,13 @@ public:
     
     // 默认工艺参数
     ProcessParams process_defaults;
+
+    // 灰度加工预留
+    bool grayscale_enabled = false;
+    double grayscale_power_min_w = 0.0;
+    double grayscale_power_max_w = 100.0;
+    double grayscale_gamma = 1.0;
+    std::string grayscale_source = "svg_luminance";
     
     // 路径段列表
     std::vector<PathSegment> segments;

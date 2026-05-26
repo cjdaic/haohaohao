@@ -12,12 +12,14 @@ struct SvgRasterKey {
     std::string filepath;
     int width = 0;
     int height = 0;
+    SvgRasterColorMode color_mode = SvgRasterColorMode::Color;
 
     bool operator==(const SvgRasterKey& other) const
     {
         return width == other.width &&
                height == other.height &&
-               filepath == other.filepath;
+               filepath == other.filepath &&
+               color_mode == other.color_mode;
     }
 };
 
@@ -27,7 +29,8 @@ struct SvgRasterKeyHash {
         const std::size_t h1 = std::hash<std::string>{}(key.filepath);
         const std::size_t h2 = std::hash<int>{}(key.width);
         const std::size_t h3 = std::hash<int>{}(key.height);
-        return h1 ^ (h2 * 1315423911u) ^ (h3 * 2654435761u);
+        const std::size_t h4 = std::hash<int>{}(static_cast<int>(key.color_mode));
+        return h1 ^ (h2 * 1315423911u) ^ (h3 * 2654435761u) ^ (h4 * 2246822519u);
     }
 };
 
@@ -50,19 +53,38 @@ bool queryFileMTime(const std::string& path,
     return has_mtime;
 }
 
+void convertImageToGrayscale(QImage& image)
+{
+    if (image.isNull()) {
+        return;
+    }
+
+    QImage rgba = image.convertToFormat(QImage::Format_RGBA8888);
+    for (int y = 0; y < rgba.height(); ++y) {
+        QRgb* row = reinterpret_cast<QRgb*>(rgba.scanLine(y));
+        for (int x = 0; x < rgba.width(); ++x) {
+            const QRgb pixel = row[x];
+            const int gray = qGray(pixel);
+            row[x] = qRgba(gray, gray, gray, qAlpha(pixel));
+        }
+    }
+    image = std::move(rgba);
+}
+
 }  // namespace
 
 bool loadSvgImageCached(const std::string& svg_filepath,
                         int width,
                         int height,
-                        QImage& out_image)
+                        QImage& out_image,
+                        SvgRasterColorMode color_mode)
 {
     out_image = QImage();
     if (svg_filepath.empty() || width <= 0 || height <= 0) {
         return false;
     }
 
-    SvgRasterKey key{svg_filepath, width, height};
+    SvgRasterKey key{svg_filepath, width, height, color_mode};
     std::filesystem::file_time_type mtime{};
     bool has_mtime = false;
     queryFileMTime(svg_filepath, mtime, has_mtime);
@@ -95,6 +117,9 @@ bool loadSvgImageCached(const std::string& svg_filepath,
     delete[] img_data;
     if (image.isNull()) {
         return false;
+    }
+    if (color_mode == SvgRasterColorMode::Grayscale) {
+        convertImageToGrayscale(image);
     }
 
     {

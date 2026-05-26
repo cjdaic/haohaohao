@@ -80,6 +80,13 @@ nlohmann::json JsonSerializer::jobToJson(const LaserJob& job) const {
     
     // process_defaults
     json["process_defaults"] = paramsToJson(job.process_defaults);
+
+    // grayscale reserved metadata
+    json["grayscale"]["enabled"] = job.grayscale_enabled;
+    json["grayscale"]["power_min_w"] = job.grayscale_power_min_w;
+    json["grayscale"]["power_max_w"] = job.grayscale_power_max_w;
+    json["grayscale"]["gamma"] = job.grayscale_gamma;
+    json["grayscale"]["source"] = job.grayscale_source;
     
     // segments
     json["segments"] = nlohmann::json::array();
@@ -121,6 +128,14 @@ std::unique_ptr<LaserJob> JsonSerializer::jsonToJob(const nlohmann::json& json) 
     if (json.contains("process_defaults")) {
         job->process_defaults = jsonToParams(json["process_defaults"]);
     }
+
+    if (json.contains("grayscale") && json["grayscale"].is_object()) {
+        job->grayscale_enabled = json["grayscale"].value("enabled", false);
+        job->grayscale_power_min_w = json["grayscale"].value("power_min_w", 0.0);
+        job->grayscale_power_max_w = json["grayscale"].value("power_max_w", 100.0);
+        job->grayscale_gamma = json["grayscale"].value("gamma", 1.0);
+        job->grayscale_source = json["grayscale"].value("source", "svg_luminance");
+    }
     
     // segments
     if (json.contains("segments") && json["segments"].is_array()) {
@@ -139,6 +154,7 @@ nlohmann::json JsonSerializer::paramsToJson(const ProcessParams& params) const {
     json["speed_mm_s"] = params.speed_mm_s;
     json["laser_on_delay_us"] = params.laser_on_delay_us;
     json["laser_off_delay_us"] = params.laser_off_delay_us;
+    json["grayscale"] = params.grayscale;
     return json;
 }
 
@@ -149,6 +165,7 @@ ProcessParams JsonSerializer::jsonToParams(const nlohmann::json& json) const {
     params.speed_mm_s = json.value("speed_mm_s", 300.0);
     params.laser_on_delay_us = json.value("laser_on_delay_us", 0);
     params.laser_off_delay_us = json.value("laser_off_delay_us", 0);
+    params.grayscale = json.value("grayscale", 0.0);
     return params;
 }
 
@@ -162,6 +179,7 @@ nlohmann::json JsonSerializer::pointToJson(const PathPoint& point) const {
     json["a"] = point.a;
     json["b"] = point.b;
     json["laser"] = point.laser;
+    json["grayscale"] = point.grayscale;
     
     if (point.params_override) {
         json["power_w"] = point.params_override->power_w;
@@ -169,6 +187,7 @@ nlohmann::json JsonSerializer::pointToJson(const PathPoint& point) const {
         json["speed_mm_s"] = point.params_override->speed_mm_s;
         json["laser_on_delay_us"] = point.params_override->laser_on_delay_us;
         json["laser_off_delay_us"] = point.params_override->laser_off_delay_us;
+        json["params_grayscale"] = point.params_override->grayscale;
     }
     
     return json;
@@ -184,16 +203,19 @@ PathPoint JsonSerializer::jsonToPoint(const nlohmann::json& json) const {
     point.a = json.value("a", 0.0);
     point.b = json.value("b", 0.0);
     point.laser = json.value("laser", 0);
+    point.grayscale = json.value("grayscale", 0.0);
     
     // 检查是否有点级参数覆盖
     if (json.contains("power_w") || json.contains("freq_hz") || json.contains("speed_mm_s") ||
-        json.contains("laser_on_delay_us") || json.contains("laser_off_delay_us")) {
+        json.contains("laser_on_delay_us") || json.contains("laser_off_delay_us") ||
+        json.contains("params_grayscale")) {
         point.params_override = std::make_unique<ProcessParams>();
         point.params_override->power_w = json.value("power_w", 20.0);
         point.params_override->freq_hz = json.value("freq_hz", 20000.0);
         point.params_override->speed_mm_s = json.value("speed_mm_s", 300.0);
         point.params_override->laser_on_delay_us = json.value("laser_on_delay_us", 0);
         point.params_override->laser_off_delay_us = json.value("laser_off_delay_us", 0);
+        point.params_override->grayscale = json.value("params_grayscale", point.grayscale);
     }
     
     return point;

@@ -136,6 +136,7 @@ private:
     struct SavedUvPoint {
         double u = 0.0;
         double v = 0.0;
+        double grayscale = 0.0;
         bool jump_before = false;
     };
 

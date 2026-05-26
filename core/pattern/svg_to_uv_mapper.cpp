@@ -73,6 +73,7 @@ void SVGToUVMapper::mapToUV(const std::vector<SVGPathPoint>& svg_points,
         // Y轴翻转：SVG的Y向下，UV的V向上
         // 翻转dy的符号，然后加上center_v
         uv_pt.v = center_v - dy * scale_y;
+        uv_pt.grayscale = std::clamp(svg_pt.grayscale, 0.0, 1.0);
         
         // 检查结果是否为NaN
         if (std::isnan(uv_pt.u) || std::isnan(uv_pt.v)) {
@@ -178,6 +179,7 @@ void SVGToUVMapper::tileToUV(const std::vector<SVGPathPoint>& svg_points,
                 // 映射到UV空间（考虑Y轴翻转）
                 uv_pt.u = base_u + normalized_x * actual_tile_u;
                 uv_pt.v = base_v + (1.0 - normalized_y) * actual_tile_v;  // Y轴翻转
+                uv_pt.grayscale = std::clamp(svg_pt.grayscale, 0.0, 1.0);
                 
                 // 检查最终UV坐标是否为NaN
                 if (std::isnan(uv_pt.u) || std::isnan(uv_pt.v)) {

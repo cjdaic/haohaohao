@@ -38,6 +38,15 @@ double distanceSqPointToLine(const Vec2d& p, const Vec2d& a, const Vec2d& b)
     return ex * ex + ey * ey;
 }
 
+double rgbaToGray01(int rgba)
+{
+    const unsigned int c = static_cast<unsigned int>(rgba);
+    const double r = static_cast<double>(c & 0xffu);
+    const double g = static_cast<double>((c >> 8) & 0xffu);
+    const double b = static_cast<double>((c >> 16) & 0xffu);
+    return std::clamp((0.299 * r + 0.587 * g + 0.114 * b) / 255.0, 0.0, 1.0);
+}
+
 void flattenCubicRecursive(const Vec2d& p0,
                            const Vec2d& p1,
                            const Vec2d& p2,
@@ -353,6 +362,7 @@ std::vector<SVGPathPoint> NanosvgWrapper::getPathPoints(double tolerance) const
             SVGPathPoint pt0;
             pt0.x = path->pts[0];
             pt0.y = path->pts[1];
+            pt0.grayscale = rgbaToGray01(shape->fill.color);
             pt0.is_move_to = true;
             points.push_back(pt0);
             total_points++;
@@ -362,6 +372,7 @@ std::vector<SVGPathPoint> NanosvgWrapper::getPathPoints(double tolerance) const
                 SVGPathPoint pt;
                 pt.x = path->pts[i * 2];
                 pt.y = path->pts[i * 2 + 1];
+                pt.grayscale = rgbaToGray01(shape->fill.color);
                 pt.is_move_to = false;
                 points.push_back(pt);
                 total_points++;

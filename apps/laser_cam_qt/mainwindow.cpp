@@ -121,6 +121,7 @@ nbcam::PathPoint clonePathPointDeep(const nbcam::PathPoint& src)
     dst.a = src.a;
     dst.b = src.b;
     dst.laser = src.laser;
+    dst.grayscale = src.grayscale;
     if (src.params_override) {
         dst.params_override = std::make_unique<nbcam::ProcessParams>(*src.params_override);
     }
@@ -2461,6 +2462,7 @@ void MainWindow::saveCurrentPathFromPreview()
         SavedUvPoint dst;
         dst.u = p.u;
         dst.v = p.v;
+        dst.grayscale = p.grayscale;
         dst.jump_before = p.is_jump_before;
         uv_snapshot.push_back(dst);
     }
@@ -4499,6 +4501,7 @@ void MainWindow::updateUIWithoutMesh()
                                 nbcam::UVPathPoint uvp;
                                 uvp.u = p.u;
                                 uvp.v = p.v;
+                                uvp.grayscale = p.grayscale;
                                 uvp.is_jump_before = p.jump_before;
                                 uvp.is_arrow_tip = false;
                                 saved_uv_path.push_back(uvp);
@@ -4526,6 +4529,10 @@ void MainWindow::updateUIWithoutMesh()
                         uv_view_->setUVPath({});
                     }
 
+                    if (controller_->hasPattern() && controller_->getPatternPatchId() < 0) {
+                        uv_view_->setUVPath(controller_->getUVPath());
+                    }
+
                     if (texture_list_widget_) {
                         const TextureInfo info = texture_list_widget_->getTexture(selected_patch_id);
                         if (info.patch_id >= 0 && !info.svg_filepath.empty()) {
@@ -4540,6 +4547,10 @@ void MainWindow::updateUIWithoutMesh()
                     }
                 }
             }
+        } else if (controller_->getCurrentMesh() && controller_->hasParameterization()) {
+            uv_view_->setUVCoords(controller_->getUVCoords());
+            uv_view_->setTriangles(controller_->getCurrentMesh()->triangles);
+            uv_view_->setUVPath(controller_->hasPattern() ? controller_->getUVPath() : std::vector<nbcam::UVPathPoint>{});
         }
     }
 
@@ -4716,15 +4727,7 @@ void MainWindow::importSVG()
             model_view_->setUpdatesEnabled(false);
         }
         
-        // 导入SVG并平铺（均匀映射到上表面）        // 计算平铺尺寸：根据SVG的实际尺寸（29mm x 14mm）和模型大小
-        // 这里使用较小的平铺单元以实现均匀分布
-        double tile_u = 0.05;  // 每个平铺单元占UV空间的5%
-        double tile_v = 0.05;
-        
-        // 如果已参数化，可以计算上表面的UV范围
-        std::vector<double> uv_bounds;  // 空表示使用整个UV空间
-        
-        bool success = controller_->importSVGWithTiling(filepath.toStdString(), tile_u, tile_v, uv_bounds);
+        bool success = controller_->importSVG(filepath.toStdString(), 0.5, 0.5, 0.9);
         progress.close();
         
         // 恢复VTK渲染
@@ -4750,13 +4753,22 @@ void MainWindow::importSVG()
             if (mapped) {
                 current_svg_path_ = QFileInfo(filepath).absoluteFilePath();
                 // 分配工艺参数（使用默认值）
-                controller_->assignProcessParams("curvature");
-                
-                // 路径规划（生成mark/jump分段）- 已注释                // controller_->planPath();
+                const bool params_assigned = controller_->assignProcessParams("curvature");
+                if (!params_assigned) {
+                    spdlog::warn("SVG导入: 工艺参数分配失败，继续使用默认参数");
+                }
+
+                const bool planned = controller_->planPath();
+                if (!planned) {
+                    QMessageBox::warning(this, "警告", "SVG已导入，但模型路径规划失败！");
+                    updateUI();
+                    statusBar()->showMessage("SVG已导入，模型路径规划失败", 5000);
+                    return;
+                }
                 
                 // 更新UI
                 updateUI();
-                statusBar()->showMessage("SVG导入成功", 3000);
+                statusBar()->showMessage("SVG导入成功，颜色已按灰度绘制", 3000);
             } else {
                 QMessageBox::warning(this, "错误", "UV到XYZ映射失败！");
             }
@@ -6576,6 +6588,13 @@ void MainWindow::updateTextureContourInfoFromJob(int patch_id, const nbcam::Lase
     info.contour_jump_segment_count = stats.contour_jump_segments;
     info.contour_mark_point_count = stats.contour_mark_points;
     info.has_saved_path = hasSavedPathForPatch(patch_id);
+    if (job) {
+        info.grayscale_converted = job->grayscale_enabled;
+        info.grayscale_power_reserved = job->grayscale_enabled;
+        info.grayscale_power_min_w = job->grayscale_power_min_w;
+        info.grayscale_power_max_w = job->grayscale_power_max_w;
+        info.grayscale_gamma = job->grayscale_gamma;
+    }
     texture_list_widget_->updateTexture(patch_id, info);
 }
 

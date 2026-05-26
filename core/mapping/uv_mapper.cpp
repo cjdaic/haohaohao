@@ -116,10 +116,12 @@ std::vector<PathPoint> UVMapper::mapUVToXYZ(const std::vector<UVPathPoint>& uv_p
         grid = buildUVGrid(mesh, uv_coords, search_list);
     }
 
+    size_t missing_triangle_count = 0;
     for (const auto& uv_point : uv_path) {
         PathPoint point;
         point.u = uv_point.u;
         point.v = uv_point.v;
+        point.grayscale = std::clamp(uv_point.grayscale, 0.0, 1.0);
 
         size_t tri_idx = mesh.triangles.size();
         if (use_grid) {
@@ -137,12 +139,20 @@ std::vector<PathPoint> UVMapper::mapUVToXYZ(const std::vector<UVPathPoint>& uv_p
             interpolateXYZ(uv_point, tri_idx, uv_coords, mesh, point.x, point.y, point.z);
             point.laser = 1;
         } else {
-            spdlog::warn("UV point ({}, {}) has no matching triangle", uv_point.u, uv_point.v);
+            if (missing_triangle_count < 20) {
+                spdlog::warn("UV point ({}, {}) has no matching triangle", uv_point.u, uv_point.v);
+            }
+            ++missing_triangle_count;
             point.x = point.y = point.z = 0.0;
             point.laser = 0;
         }
 
         xyz_path.push_back(std::move(point));
+    }
+
+    if (missing_triangle_count > 20) {
+        spdlog::warn("UV to XYZ mapping skipped {} additional points without matching triangle",
+                     missing_triangle_count - 20);
     }
 
     return xyz_path;

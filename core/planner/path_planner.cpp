@@ -19,6 +19,7 @@ void copyPointCoord(nbcam::PathPoint& dst, const nbcam::PathPoint& src)
     dst.z = src.z;
     dst.a = src.a;
     dst.b = src.b;
+    dst.grayscale = src.grayscale;
 }
 
 void normalizeSegmentSequence(nbcam::LaserJob& job)
@@ -71,6 +72,9 @@ void PathPlanner::addJumpSegments(LaserJob& job) {
             last_point_ref.x = last_point.x;
             last_point_ref.y = last_point.y;
             last_point_ref.z = last_point.z;
+            last_point_ref.a = last_point.a;
+            last_point_ref.b = last_point.b;
+            last_point_ref.grayscale = last_point.grayscale;
         }
         
         // 使用移动语义，因为PathPoint不可复制
@@ -93,6 +97,9 @@ void PathPlanner::addJumpSegments(LaserJob& job) {
                 jump_start.x = last_point_ref.x;
                 jump_start.y = last_point_ref.y;
                 jump_start.z = last_point_ref.z;
+                jump_start.a = last_point_ref.a;
+                jump_start.b = last_point_ref.b;
+                jump_start.grayscale = last_point_ref.grayscale;
                 jump_start.laser = 0;  // 激光关闭
                 
                 const auto& next_first = job.segments[i + 1].points.front();
@@ -102,6 +109,9 @@ void PathPlanner::addJumpSegments(LaserJob& job) {
                 jump_end.x = next_first.x;
                 jump_end.y = next_first.y;
                 jump_end.z = next_first.z;
+                jump_end.a = next_first.a;
+                jump_end.b = next_first.b;
+                jump_end.grayscale = next_first.grayscale;
                 jump_end.laser = 0;
                 
                 jump_segment.points.push_back(std::move(jump_start));

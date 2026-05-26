@@ -9,6 +9,7 @@ namespace nbcam {
 // SVG路径点（2D坐标）
 struct SVGPathPoint {
     double x, y;
+    double grayscale = 0.0;  // 由填充/描边颜色换算的灰度强度 [0,1]
     bool is_move_to = false;  // 是否为MoveTo命令
 };
 

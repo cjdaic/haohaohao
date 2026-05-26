@@ -9,6 +9,11 @@ void LaserJob::clear() {
     coordinate = CoordinateInfo();
     parameterization = ParameterizationInfo();
     process_defaults = ProcessParams();
+    grayscale_enabled = false;
+    grayscale_power_min_w = 0.0;
+    grayscale_power_max_w = 100.0;
+    grayscale_gamma = 1.0;
+    grayscale_source = "svg_luminance";
     segments.clear();
 }
 

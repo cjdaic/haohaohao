@@ -146,8 +146,15 @@ std::vector<UVPathPoint> LineHatchStrategy::generatePath(
             auto [u0, v0] = rotatePoint(start_x, v, center_u, center_v, angle_rad);
             auto [u1, v1] = rotatePoint(end_x, v, center_u, center_v, angle_rad);
 
-            UVPathPoint p0{u0, v0, !path.empty(), false};
-            UVPathPoint p1{u1, v1, false, true};
+            UVPathPoint p0;
+            p0.u = u0;
+            p0.v = v0;
+            p0.is_jump_before = !path.empty();
+
+            UVPathPoint p1;
+            p1.u = u1;
+            p1.v = v1;
+            p1.is_arrow_tip = true;
             path.push_back(p0);
             path.push_back(p1);
             ++stripe_index;

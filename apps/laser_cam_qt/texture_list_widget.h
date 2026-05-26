@@ -25,6 +25,11 @@ struct TextureInfo {
     double rotation_deg;
     bool enable_inverse_stretch_prewarp;
     double inverse_stretch_prewarp_strength;
+    bool grayscale_converted;
+    bool grayscale_power_reserved;
+    double grayscale_power_min_w;
+    double grayscale_power_max_w;
+    double grayscale_gamma;
     bool has_saved_path;
     int contour_loop_count;
     int contour_mark_segment_count;
@@ -46,6 +51,11 @@ struct TextureInfo {
         , rotation_deg(0.0)
         , enable_inverse_stretch_prewarp(true)
         , inverse_stretch_prewarp_strength(1.2)
+        , grayscale_converted(true)
+        , grayscale_power_reserved(true)
+        , grayscale_power_min_w(0.0)
+        , grayscale_power_max_w(100.0)
+        , grayscale_gamma(1.0)
         , has_saved_path(false)
         , contour_loop_count(0)
         , contour_mark_segment_count(0)

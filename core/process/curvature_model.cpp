@@ -58,6 +58,7 @@ void CurvatureModel::assignProcessParams(
         point.params_override->power_w = min_power_ + curvature_norm * (max_power_ - min_power_);
         point.params_override->speed_mm_s = max_speed_ - curvature_norm * (max_speed_ - min_speed_);
         point.params_override->freq_hz = 20000;  // 默认频率
+        point.params_override->grayscale = std::clamp(point.grayscale, 0.0, 1.0);
     }
     
     spdlog::info("基于曲率分配工艺参数完成，点数: {}", points.size());

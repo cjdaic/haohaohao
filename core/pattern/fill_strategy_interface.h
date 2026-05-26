@@ -8,6 +8,7 @@ namespace nbcam {
 // UV路径点
 struct UVPathPoint {
     double u, v;
+    double grayscale = 0.0;    // 预留：纹理灰度强度 [0,1]
     bool is_jump_before = false;   // true表示此点前有跳转（不连线）
     bool is_arrow_tip = false;     // true表示在此点绘制箭头指示方向（从上一点到此点）
 };

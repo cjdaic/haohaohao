@@ -230,7 +230,8 @@ void UVView::setTexture(int patch_id, const std::string& svg_filepath,
     }
 
     QImage image;
-    if (loadSvgImageCached(svg_filepath, preview_size.first, preview_size.second, image)) {
+    if (loadSvgImageCached(svg_filepath, preview_size.first, preview_size.second, image,
+                           SvgRasterColorMode::Grayscale)) {
         tex.image = std::move(image);
     }
 
@@ -647,8 +648,7 @@ void UVView::paintEvent(QPaintEvent *event)
     
     // 绘制纹理（在网格之前绘制，作为背景）
     painter.save();
-    if (!heavy_path) {
-        for (const auto& pair : textures_) {
+    for (const auto& pair : textures_) {
         const TextureData& tex = pair.second;
         
         if (tex.image.isNull()) {
@@ -769,7 +769,6 @@ void UVView::paintEvent(QPaintEvent *event)
         painter.setBrush(Qt::NoBrush);
         painter.drawPolygon(polygon);
         painter.restore();
-        }
     }
     painter.restore();
     
@@ -923,9 +922,13 @@ void UVView::paintEvent(QPaintEvent *event)
             }
 
             const bool is_jump = uv_path_[i + display_step].is_jump_before;
+            const double gray_01 = std::clamp((uv_path_[i].grayscale + uv_path_[i + display_step].grayscale) * 0.5,
+                                              0.0,
+                                              1.0);
+            const int gray = static_cast<int>(std::clamp(gray_01 * 255.0, 0.0, 255.0));
             QPen segment_pen = is_jump
                 ? QPen(QColor(120, 120, 120), 1.2, Qt::DashLine)
-                : QPen(QColor(220, 20, 20), 1.4, Qt::SolidLine);
+                : QPen(QColor(gray, gray, gray), 1.4, Qt::SolidLine);
             painter.setPen(segment_pen);
             painter.drawLine(p1, p2);
 
@@ -951,13 +954,14 @@ void UVView::paintEvent(QPaintEvent *event)
 
         if (!heavy_path) {
             // 绘制路径点（轻量）
-            painter.setPen(QPen(QColor(255, 0, 0), 1));
-            painter.setBrush(QBrush(QColor(255, 0, 0)));
             for (size_t i = 0; i < uv_path_.size(); i += display_step) {
                 const auto& point = uv_path_[i];
                 if (!std::isfinite(point.u) || !std::isfinite(point.v)) continue;
                 QPointF p = uvPathToScreen(point.u, point.v);
                 if (!isReasonableScreenPoint(p)) continue;
+                const int gray = static_cast<int>(std::clamp(point.grayscale * 255.0, 0.0, 255.0));
+                painter.setPen(QPen(QColor(gray, gray, gray), 1));
+                painter.setBrush(QBrush(QColor(gray, gray, gray)));
                 painter.drawEllipse(p, 1.5, 1.5);
             }
         }

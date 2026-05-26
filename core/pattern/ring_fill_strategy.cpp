@@ -64,11 +64,32 @@ std::vector<UVPathPoint> RingFillStrategy::generatePath(
             continue;
         }
 
-        path.push_back(UVPathPoint{ru_min, rv_min, layer > 0, false});
-        path.push_back(UVPathPoint{ru_max, rv_min, false, false});
-        path.push_back(UVPathPoint{ru_max, rv_max, false, false});
-        path.push_back(UVPathPoint{ru_min, rv_max, false, false});
-        path.push_back(UVPathPoint{ru_min, rv_min, false, true});
+        UVPathPoint p;
+        p.u = ru_min;
+        p.v = rv_min;
+        p.is_jump_before = (layer > 0);
+        path.push_back(p);
+
+        p = UVPathPoint{};
+        p.u = ru_max;
+        p.v = rv_min;
+        path.push_back(p);
+
+        p = UVPathPoint{};
+        p.u = ru_max;
+        p.v = rv_max;
+        path.push_back(p);
+
+        p = UVPathPoint{};
+        p.u = ru_min;
+        p.v = rv_max;
+        path.push_back(p);
+
+        p = UVPathPoint{};
+        p.u = ru_min;
+        p.v = rv_min;
+        p.is_arrow_tip = true;
+        path.push_back(p);
     }
 
     spdlog::info("RingFill generated: {} layers, {} points", layers.size(), path.size());
