@@ -196,6 +196,30 @@ double resolveAngleFromDirection(double angle_deg, const std::string& direction_
     return angle_deg;
 }
 
+int grayscaleBucketForPlan(double gray01)
+{
+    const int gray256 = static_cast<int>(std::floor(std::clamp(gray01, 0.0, 1.0) * 256.0));
+    return std::clamp(gray256 / 10, 0, 25);
+}
+
+nbcam::PathPoint cloneJobPoint(const nbcam::PathPoint& src)
+{
+    nbcam::PathPoint dst;
+    dst.u = src.u;
+    dst.v = src.v;
+    dst.x = src.x;
+    dst.y = src.y;
+    dst.z = src.z;
+    dst.a = src.a;
+    dst.b = src.b;
+    dst.laser = src.laser;
+    dst.grayscale = src.grayscale;
+    if (src.params_override) {
+        dst.params_override = std::make_unique<nbcam::ProcessParams>(*src.params_override);
+    }
+    return dst;
+}
+
 void resampleJobSegmentsToConvexArc(nbcam::LaserJob& job,
                                     double center_x,
                                     double center_z,
@@ -1897,6 +1921,23 @@ nbcam::PathPoint clonePathPointWithLaser(const nbcam::PathPoint& src, int laser_
     return dst;
 }
 
+std::vector<std::vector<nbcam::PathPoint>> clonePathLoopsWithLaser(
+    const std::vector<std::vector<nbcam::PathPoint>>& src,
+    int laser_override)
+{
+    std::vector<std::vector<nbcam::PathPoint>> dst;
+    dst.reserve(src.size());
+    for (const auto& loop : src) {
+        std::vector<nbcam::PathPoint> copied_loop;
+        copied_loop.reserve(loop.size());
+        for (const auto& point : loop) {
+            copied_loop.push_back(clonePathPointWithLaser(point, laser_override));
+        }
+        dst.push_back(std::move(copied_loop));
+    }
+    return dst;
+}
+
 double sampleSvgPointGrayscale(double uv_u,
                                double uv_v,
                                const ApplicationController::PatternPlanOptions& options,
@@ -3575,6 +3616,8 @@ void ApplicationController::resetProcessingStateKeepMeshInternal(bool emit_job_r
     arc_scan_speed_mm_s_ = -1.0;
     arc_path_prebaked_ = false;
     current_path_uses_grayscale_ = false;
+    current_path_all_svg_boundary_ = false;
+    pending_svg_boundary_xyz_loops_.clear();
     planned_spacing_hint_mm_ = -1.0;
     if (current_job_) {
         current_job_->clear();
@@ -3905,6 +3948,8 @@ bool ApplicationController::generatePattern(const std::string& strategy, double 
         arc_scan_speed_mm_s_ = -1.0;
         arc_path_prebaked_ = false;
         current_path_uses_grayscale_ = false;
+        current_path_all_svg_boundary_ = false;
+        pending_svg_boundary_xyz_loops_.clear();
 
         std::vector<nbcam::UVCoord> boundary;
         if (!svg_boundary_.empty()) {
@@ -3983,6 +4028,8 @@ bool ApplicationController::importSVG(const std::string& filepath, double center
         arc_path_prebaked_ = false;
         planned_spacing_hint_mm_ = -1.0;
         current_path_uses_grayscale_ = false;
+        current_path_all_svg_boundary_ = false;
+        pending_svg_boundary_xyz_loops_.clear();
         uv_mapper.mapToUV(svg_points, uv_path_, center_u, center_v, scale, true);
         current_path_uses_grayscale_ = !uv_path_.empty();
 
@@ -4195,7 +4242,14 @@ bool ApplicationController::assignProcessParams(const std::string& model_type)
     }
 }
 
-bool ApplicationController::planPath()
+void ApplicationController::setGrayscalePowerRange(double min_power_w, double max_power_w, double gamma)
+{
+    grayscale_power_min_w_ = min_power_w;
+    grayscale_power_max_w_ = max_power_w;
+    grayscale_gamma_ = (std::isfinite(gamma) && gamma > 1e-9) ? gamma : 1.0;
+}
+
+bool ApplicationController::planPath(bool apply_postprocess)
 {
     if (xyz_path_.empty()) {
         spdlog::error("PlanPath: xyz_path is empty");
@@ -4216,17 +4270,42 @@ bool ApplicationController::planPath()
         if (!xyz_path_.empty() && xyz_path_[0].params_override) {
             current_job_->process_defaults = *xyz_path_[0].params_override;
         }
+        current_job_->grayscale_enabled = current_path_uses_grayscale_;
+        current_job_->grayscale_power_min_w = grayscale_power_min_w_;
+        current_job_->grayscale_power_max_w = grayscale_power_max_w_;
+        current_job_->grayscale_gamma = grayscale_gamma_;
+        current_job_->grayscale_source = "svg_luminance";
+        if (current_job_->grayscale_enabled) {
+            current_job_->process_defaults.power_w = std::min(grayscale_power_min_w_, grayscale_power_max_w_);
+            current_job_->process_defaults.grayscale = 0.0;
+        }
 
         constexpr double kJumpThreshold = 0.5;
         int segment_id = 0;
         nbcam::PathSegment* current_segment = nullptr;
+        int current_grayscale_bucket = -1;
+        nbcam::PathPoint last_valid_job_point;
+        bool has_last_valid_job_point = false;
 
         for (size_t i = 0; i < xyz_path_.size(); ++i) {
             const auto& curr = xyz_path_[i];
             if (!std::isfinite(curr.x) || !std::isfinite(curr.y) || !std::isfinite(curr.z)) {
                 current_segment = nullptr;
+                current_grayscale_bucket = -1;
+                has_last_valid_job_point = false;
                 continue;
             }
+
+            const double curr_grayscale = current_path_all_svg_boundary_
+                                              ? 1.0
+                                              : (current_path_uses_grayscale_
+                                                     ? std::clamp(curr.grayscale, 0.0, 1.0)
+                                                     : 0.0);
+            const int curr_bucket = current_path_all_svg_boundary_
+                                        ? 26
+                                        : (current_path_uses_grayscale_
+                                               ? grayscaleBucketForPlan(curr_grayscale)
+                                               : -1);
 
             bool is_break = false;
             if (i < path_break_flags_.size() && path_break_flags_[i]) {
@@ -4248,15 +4327,40 @@ bool ApplicationController::planPath()
 
             if (is_break) {
                 current_segment = nullptr;
+                current_grayscale_bucket = -1;
             }
+
+            bool bucket_changed = current_path_uses_grayscale_ &&
+                                  current_segment != nullptr &&
+                                  current_grayscale_bucket >= 0 &&
+                                  curr_bucket != current_grayscale_bucket;
 
             if (!current_segment) {
                 nbcam::PathSegment segment;
                 segment.id = segment_id++;
                 segment.type = nbcam::SegmentType::MARK;
                 segment.strategy = current_fill_strategy_;
+                segment.grayscale_bucket = curr_bucket;
                 current_job_->segments.push_back(std::move(segment));
                 current_segment = &current_job_->segments.back();
+                current_grayscale_bucket = curr_bucket;
+            } else if (bucket_changed) {
+                nbcam::PathSegment segment;
+                segment.id = segment_id++;
+                segment.type = nbcam::SegmentType::MARK;
+                segment.strategy = current_fill_strategy_;
+                segment.grayscale_bucket = curr_bucket;
+                if (has_last_valid_job_point) {
+                    auto bridge = cloneJobPoint(last_valid_job_point);
+                    bridge.grayscale = curr_grayscale;
+                    if (bridge.params_override) {
+                        bridge.params_override->grayscale = bridge.grayscale;
+                    }
+                    segment.points.push_back(std::move(bridge));
+                }
+                current_job_->segments.push_back(std::move(segment));
+                current_segment = &current_job_->segments.back();
+                current_grayscale_bucket = curr_bucket;
             }
 
             nbcam::PathPoint point;
@@ -4268,7 +4372,8 @@ bool ApplicationController::planPath()
             point.a = curr.a;
             point.b = curr.b;
             point.laser = 1;
-            point.grayscale = std::clamp(curr.grayscale, 0.0, 1.0);
+            point.grayscale = curr_grayscale;
+            point.params_override = nullptr;
 
             if (curr.params_override) {
                 point.params_override = std::make_unique<nbcam::ProcessParams>(*curr.params_override);
@@ -4276,6 +4381,8 @@ bool ApplicationController::planPath()
             }
 
             current_segment->points.push_back(std::move(point));
+            last_valid_job_point = cloneJobPoint(current_segment->points.back());
+            has_last_valid_job_point = true;
         }
 
         current_job_->segments.erase(
@@ -4293,13 +4400,32 @@ bool ApplicationController::planPath()
             return false;
         }
 
-        current_job_->grayscale_enabled = current_path_uses_grayscale_;
-        current_job_->grayscale_power_min_w = 0.0;
-        current_job_->grayscale_power_max_w = 100.0;
-        current_job_->grayscale_gamma = 1.0;
-        current_job_->grayscale_source = "svg_luminance";
+        if (!current_path_all_svg_boundary_ && !pending_svg_boundary_xyz_loops_.empty()) {
+            for (const auto& contour_xyz : pending_svg_boundary_xyz_loops_) {
+                if (contour_xyz.size() < 2) {
+                    continue;
+                }
 
-        if (current_strategy_name_ == "arc_hatch" && !arc_path_prebaked_) {
+                nbcam::PathSegment boundary_segment;
+                boundary_segment.id = segment_id++;
+                boundary_segment.type = nbcam::SegmentType::MARK;
+                boundary_segment.strategy = nbcam::FillStrategy::CONTOUR;
+                boundary_segment.grayscale_bucket = 26;
+                boundary_segment.svg_boundary = true;
+                boundary_segment.points.reserve(contour_xyz.size());
+                for (const auto& src_point : contour_xyz) {
+                    auto point = clonePathPointWithLaser(src_point, 1);
+                    point.grayscale = 1.0;
+                    if (point.params_override) {
+                        point.params_override->grayscale = 1.0;
+                    }
+                    boundary_segment.points.push_back(std::move(point));
+                }
+                current_job_->segments.push_back(std::move(boundary_segment));
+            }
+        }
+
+        if (apply_postprocess && current_strategy_name_ == "arc_hatch" && !arc_path_prebaked_) {
             resampleJobSegmentsToConvexArc(*current_job_,
                                            arc_center_x_,
                                            arc_center_z_,
@@ -4310,11 +4436,13 @@ bool ApplicationController::planPath()
                          arc_center_z_,
                          arc_radius_,
                          arc_scan_speed_mm_s_);
-        } else if (current_strategy_name_ == "arc_hatch") {
+        } else if (apply_postprocess && current_strategy_name_ == "arc_hatch") {
             spdlog::info("PlanPath: arc_hatch points are prebaked on arc surface, skip resampling");
         }
 
-        path_planner_.postProcess(*current_job_);
+        if (apply_postprocess) {
+            path_planner_.postProcess(*current_job_);
+        }
 
         spdlog::info("PlanPath done: segments={}, points={}",
                      current_job_->segments.size(),
@@ -4461,6 +4589,8 @@ void ApplicationController::clearPatternForPatch(int patch_id)
     pattern_patch_id_ = -1;
     planned_spacing_hint_mm_ = -1.0;
     arc_path_prebaked_ = false;
+    current_path_all_svg_boundary_ = false;
+    pending_svg_boundary_xyz_loops_.clear();
     if (current_job_) {
         current_job_->clear();
     }
@@ -4485,6 +4615,9 @@ bool ApplicationController::generatePatternInPatch(int patch_id,
 
     const auto& patch = patches[patch_id];
     try {
+        setGrayscalePowerRange(options.grayscale_power_min_w,
+                               options.grayscale_power_max_w,
+                               options.grayscale_gamma);
         arc_path_prebaked_ = false;
         // 不再切换“映射畸变模式”，默认沿用当前曲面展开的参数化类型。
         bool need_parameterize = true;
@@ -4797,6 +4930,7 @@ bool ApplicationController::generatePatternInPatch(int patch_id,
             uv_path_.clear();
             xyz_path_.clear();
             path_break_flags_.clear();
+            pending_svg_boundary_xyz_loops_.clear();
 
             for (size_t loop_idx = 0; loop_idx < contour_uv_loops.size() && loop_idx < contour_xyz_loops.size(); ++loop_idx) {
                 const auto& uv_loop = contour_uv_loops[loop_idx];
@@ -4820,22 +4954,22 @@ bool ApplicationController::generatePatternInPatch(int patch_id,
 
             current_fill_strategy_ = nbcam::FillStrategy::CONTOUR;
             current_job_->clear();
-            if (!prependContourSegmentsToJob(*current_job_, contour_xyz_loops)) {
-                spdlog::error("GeneratePatternInPatch: failed to build contour-only job segments");
-                emit patternGenerated(false);
-                return false;
-            }
-
             current_path_uses_grayscale_ = !svg_mask_rgba.empty();
+            current_path_all_svg_boundary_ = true;
+            pending_svg_boundary_xyz_loops_ = clonePathLoopsWithLaser(contour_xyz_loops, 1);
             current_job_->grayscale_enabled = current_path_uses_grayscale_;
-            current_job_->grayscale_power_min_w = 0.0;
-            current_job_->grayscale_power_max_w = 100.0;
-            current_job_->grayscale_gamma = 1.0;
+            current_job_->grayscale_power_min_w = options.grayscale_power_min_w;
+            current_job_->grayscale_power_max_w = options.grayscale_power_max_w;
+            current_job_->grayscale_gamma = options.grayscale_gamma;
             current_job_->grayscale_source = "svg_luminance";
 
             planned_spacing_hint_mm_ = options.spacing;
             pattern_patch_id_ = patch_id;
-            emit jobReady(true);
+            if (!planPath()) {
+                spdlog::error("GeneratePatternInPatch: contour-only planPath failed");
+                emit patternGenerated(false);
+                return false;
+            }
             emit patternGenerated(true);
             return true;
         }
@@ -4868,6 +5002,11 @@ bool ApplicationController::generatePatternInPatch(int patch_id,
             arc_center_z_ = used_center_axis2;
             arc_radius_ = used_radius;
             current_path_uses_grayscale_ = !svg_mask_rgba.empty();
+            current_path_all_svg_boundary_ = false;
+            pending_svg_boundary_xyz_loops_.clear();
+            if (need_contour_prefix) {
+                pending_svg_boundary_xyz_loops_ = clonePathLoopsWithLaser(contour_xyz_loops, 1);
+            }
             spdlog::info("GeneratePatternInPatch: arc_hatch generated directly on arc surface, center=({}, {}, row-axis-auto), R={}, spacing={}",
                          used_center_x,
                          used_center_axis2,
@@ -4882,14 +5021,6 @@ bool ApplicationController::generatePatternInPatch(int patch_id,
                 spdlog::error("GeneratePatternInPatch: planPath failed");
                 emit patternGenerated(false);
                 return false;
-            }
-
-            if (need_contour_prefix) {
-                if (!prependContourSegmentsToJob(*current_job_, contour_xyz_loops)) {
-                    spdlog::error("GeneratePatternInPatch: failed to prepend contour segments");
-                    emit patternGenerated(false);
-                    return false;
-                }
             }
 
             planned_spacing_hint_mm_ = options.spacing;
@@ -4912,6 +5043,7 @@ bool ApplicationController::generatePatternInPatch(int patch_id,
             }
 
             current_path_uses_grayscale_ = apply_svg_mask;
+            current_path_all_svg_boundary_ = false;
 
             if (!assignProcessParams("curvature")) {
                 spdlog::warn("GeneratePatternInPatch: assignProcessParams failed, continue with defaults");
@@ -4942,6 +5074,8 @@ bool ApplicationController::generatePatternInPatch(int patch_id,
         arc_radius_ = options.arc_radius;
         arc_scan_speed_mm_s_ = options.scan_speed_mm_s;
         arc_path_prebaked_ = false;
+        current_path_all_svg_boundary_ = false;
+        pending_svg_boundary_xyz_loops_.clear();
 
         double effective_angle = resolveAngleFromDirection(options.angle_deg, options.direction_mode);
         if (normalized_strategy == "ring_outin") {
@@ -5040,18 +5174,14 @@ bool ApplicationController::generatePatternInPatch(int patch_id,
             spdlog::warn("GeneratePatternInPatch: assignProcessParams failed, continue with defaults");
         }
 
+        if (need_contour_prefix) {
+            pending_svg_boundary_xyz_loops_ = clonePathLoopsWithLaser(contour_xyz_loops, 1);
+        }
+
         if (!planPath()) {
             spdlog::error("GeneratePatternInPatch: planPath failed");
             emit patternGenerated(false);
             return false;
-        }
-
-        if (need_contour_prefix) {
-            if (!prependContourSegmentsToJob(*current_job_, contour_xyz_loops)) {
-                spdlog::error("GeneratePatternInPatch: failed to prepend contour segments");
-                emit patternGenerated(false);
-                return false;
-            }
         }
 
         planned_spacing_hint_mm_ = options.spacing;

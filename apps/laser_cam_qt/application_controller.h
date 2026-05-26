@@ -65,6 +65,10 @@ public:
         double arc_radius = 20.0;
         // 扫描速度（mm/s，>0 时用于圆弧重采样步进）
         double scan_speed_mm_s = -1.0;
+        // 灰度变功率：0灰度对应下限，256灰度对应上限。
+        double grayscale_power_min_w = 0.0;
+        double grayscale_power_max_w = 20.0;
+        double grayscale_gamma = 1.0;
     };
 
     explicit ApplicationController(QObject *parent = nullptr);
@@ -129,7 +133,8 @@ public:
     bool assignProcessParams(const std::string& model_type = "curvature");
 
     // 路径规划：将xyz_path_转换为LaserJob分段并应用后处理，结果用于模型视图绘制
-    bool planPath();
+    bool planPath(bool apply_postprocess = true);
+    void setGrayscalePowerRange(double min_power_w, double max_power_w, double gamma = 1.0);
 
     // 任务操作
     bool saveJob(const std::string& filepath);
@@ -196,6 +201,11 @@ private:
     double arc_scan_speed_mm_s_ = -1.0;
     bool arc_path_prebaked_ = false;
     bool current_path_uses_grayscale_ = false;
+    bool current_path_all_svg_boundary_ = false;
+    double grayscale_power_min_w_ = 0.0;
+    double grayscale_power_max_w_ = 20.0;
+    double grayscale_gamma_ = 1.0;
+    std::vector<std::vector<nbcam::PathPoint>> pending_svg_boundary_xyz_loops_;
 };
 
 #endif // APPLICATION_CONTROLLER_H

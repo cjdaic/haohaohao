@@ -224,6 +224,8 @@ PathPoint JsonSerializer::jsonToPoint(const nlohmann::json& json) const {
 nlohmann::json JsonSerializer::segmentToJson(const PathSegment& segment) const {
     nlohmann::json json;
     json["id"] = segment.id;
+    json["grayscale_bucket"] = segment.grayscale_bucket;
+    json["svg_boundary"] = segment.svg_boundary;
     
     // type
     json["type"] = (segment.type == SegmentType::MARK) ? "mark" : "jump";
@@ -256,6 +258,8 @@ nlohmann::json JsonSerializer::segmentToJson(const PathSegment& segment) const {
 PathSegment JsonSerializer::jsonToSegment(const nlohmann::json& json) const {
     PathSegment segment;
     segment.id = json.value("id", 0);
+    segment.grayscale_bucket = json.value("grayscale_bucket", -1);
+    segment.svg_boundary = json.value("svg_boundary", false);
     
     // type
     std::string type_str = json.value("type", "mark");

@@ -47,6 +47,20 @@ double rgbaToGray01(int rgba)
     return std::clamp((0.299 * r + 0.587 * g + 0.114 * b) / 255.0, 0.0, 1.0);
 }
 
+double shapePaintGray01(const NSVGshape* shape)
+{
+    if (!shape) {
+        return 0.0;
+    }
+    if (shape->fill.type != NSVG_PAINT_NONE) {
+        return rgbaToGray01(shape->fill.color);
+    }
+    if (shape->stroke.type != NSVG_PAINT_NONE) {
+        return rgbaToGray01(shape->stroke.color);
+    }
+    return 0.0;
+}
+
 void flattenCubicRecursive(const Vec2d& p0,
                            const Vec2d& p1,
                            const Vec2d& p2,
@@ -359,10 +373,12 @@ std::vector<SVGPathPoint> NanosvgWrapper::getPathPoints(double tolerance) const
             }
             
             // 第一个点标记为MoveTo
+            const double shape_gray = shapePaintGray01(shape);
+
             SVGPathPoint pt0;
             pt0.x = path->pts[0];
             pt0.y = path->pts[1];
-            pt0.grayscale = rgbaToGray01(shape->fill.color);
+            pt0.grayscale = shape_gray;
             pt0.is_move_to = true;
             points.push_back(pt0);
             total_points++;
@@ -372,7 +388,7 @@ std::vector<SVGPathPoint> NanosvgWrapper::getPathPoints(double tolerance) const
                 SVGPathPoint pt;
                 pt.x = path->pts[i * 2];
                 pt.y = path->pts[i * 2 + 1];
-                pt.grayscale = rgbaToGray01(shape->fill.color);
+                pt.grayscale = shape_gray;
                 pt.is_move_to = false;
                 points.push_back(pt);
                 total_points++;

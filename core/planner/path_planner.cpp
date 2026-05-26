@@ -1,14 +1,41 @@
 #include "path_planner.h"
 #include <spdlog/spdlog.h>
 #define _USE_MATH_DEFINES
-#include <cmath>
 #include <algorithm>
+#include <cmath>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
 
 namespace {
+
+constexpr int kGrayscaleBucketCount = 26;
+constexpr int kBoundaryBucket = kGrayscaleBucketCount;
+
+int grayscaleToBucket(double gray01)
+{
+    const int gray256 = static_cast<int>(std::floor(std::clamp(gray01, 0.0, 1.0) * 256.0));
+    return std::clamp(gray256 / 10, 0, kGrayscaleBucketCount - 1);
+}
+
+double bucketToGray01(int bucket)
+{
+    if (bucket >= kBoundaryBucket) {
+        return 1.0;
+    }
+    return std::clamp(static_cast<double>(bucket) / 25.0, 0.0, 1.0);
+}
+
+bool sameProcessParams(const nbcam::ProcessParams& a, const nbcam::ProcessParams& b)
+{
+    return std::abs(a.power_w - b.power_w) <= 1e-6 &&
+           std::abs(a.freq_hz - b.freq_hz) <= 1e-6 &&
+           std::abs(a.speed_mm_s - b.speed_mm_s) <= 1e-6 &&
+           a.laser_on_delay_us == b.laser_on_delay_us &&
+           a.laser_off_delay_us == b.laser_off_delay_us &&
+           std::abs(a.grayscale - b.grayscale) <= 1e-6;
+}
 
 void copyPointCoord(nbcam::PathPoint& dst, const nbcam::PathPoint& src)
 {
@@ -24,112 +51,102 @@ void copyPointCoord(nbcam::PathPoint& dst, const nbcam::PathPoint& src)
 
 void normalizeSegmentSequence(nbcam::LaserJob& job)
 {
-    // 过滤掉无效段（至少需要两个点才能形成有效线段）
     job.segments.erase(
         std::remove_if(job.segments.begin(), job.segments.end(),
                        [](const nbcam::PathSegment& seg) { return seg.points.size() < 2; }),
         job.segments.end());
 
-    // 统一顺序ID，避免MARK/JUMP出现重复ID。
     for (size_t i = 0; i < job.segments.size(); ++i) {
         job.segments[i].id = static_cast<int>(i);
     }
+}
 
-    // 强制相邻段首尾连续，确保扫描轨迹在ID顺序上严格相接。
-    for (size_t i = 1; i < job.segments.size(); ++i) {
-        auto& prev = job.segments[i - 1];
-        auto& curr = job.segments[i];
-        if (prev.points.empty() || curr.points.empty()) {
-            continue;
-        }
-        copyPointCoord(curr.points.front(), prev.points.back());
+int segmentSortBucket(const nbcam::PathSegment& segment)
+{
+    if (segment.svg_boundary) {
+        return kBoundaryBucket;
     }
+    if (segment.grayscale_bucket >= 0) {
+        return std::clamp(segment.grayscale_bucket, 0, kGrayscaleBucketCount - 1);
+    }
+    if (segment.points.empty()) {
+        return 0;
+    }
+
+    double sum = 0.0;
+    size_t valid = 0;
+    for (const auto& point : segment.points) {
+        if (std::isfinite(point.grayscale)) {
+            sum += std::clamp(point.grayscale, 0.0, 1.0);
+            ++valid;
+        }
+    }
+    return grayscaleToBucket(valid > 0 ? sum / static_cast<double>(valid) : 0.0);
 }
 
 }  // namespace
 
 namespace nbcam {
 
-void PathPlanner::postProcess(LaserJob& job) {
-    addJumpSegments(job);
+void PathPlanner::postProcess(LaserJob& job)
+{
     applyCornerDeceleration(job);
+    assignGrayscaleBuckets(job,
+                           job.grayscale_power_min_w,
+                           job.grayscale_power_max_w,
+                           job.grayscale_gamma);
     sparsifyParams(job);
     optimizePathOrder(job);
+    addJumpSegments(job);
     normalizeSegmentSequence(job);
 }
 
-void PathPlanner::addJumpSegments(LaserJob& job) {
+void PathPlanner::addJumpSegments(LaserJob& job)
+{
     std::vector<PathSegment> new_segments;
-    
+    new_segments.reserve(job.segments.size() * 2);
+
     for (size_t i = 0; i < job.segments.size(); ++i) {
-        // 先保存需要的信息，再移动
         bool has_points = !job.segments[i].points.empty();
         PathPoint last_point_ref;
         if (has_points) {
-            const auto& last_point = job.segments[i].points.back();
-            last_point_ref.u = last_point.u;
-            last_point_ref.v = last_point.v;
-            last_point_ref.x = last_point.x;
-            last_point_ref.y = last_point.y;
-            last_point_ref.z = last_point.z;
-            last_point_ref.a = last_point.a;
-            last_point_ref.b = last_point.b;
-            last_point_ref.grayscale = last_point.grayscale;
+            copyPointCoord(last_point_ref, job.segments[i].points.back());
         }
-        
-        // 使用移动语义，因为PathPoint不可复制
+
         PathSegment segment = std::move(job.segments[i]);
-        
-        // 添加当前段
         new_segments.push_back(std::move(segment));
-        
-        // 如果不是最后一个段，添加跳线段
+
         if (i < job.segments.size() - 1) {
             PathSegment jump_segment;
             jump_segment.id = static_cast<int>(new_segments.size());
             jump_segment.type = SegmentType::JUMP;
-            
-            // 从当前段的最后一个点到下一个段的第一个点
+
             if (has_points && !job.segments[i + 1].points.empty()) {
                 PathPoint jump_start;
-                jump_start.u = last_point_ref.u;
-                jump_start.v = last_point_ref.v;
-                jump_start.x = last_point_ref.x;
-                jump_start.y = last_point_ref.y;
-                jump_start.z = last_point_ref.z;
-                jump_start.a = last_point_ref.a;
-                jump_start.b = last_point_ref.b;
-                jump_start.grayscale = last_point_ref.grayscale;
-                jump_start.laser = 0;  // 激光关闭
-                
+                copyPointCoord(jump_start, last_point_ref);
+                jump_start.laser = 0;
+
                 const auto& next_first = job.segments[i + 1].points.front();
                 PathPoint jump_end;
-                jump_end.u = next_first.u;
-                jump_end.v = next_first.v;
-                jump_end.x = next_first.x;
-                jump_end.y = next_first.y;
-                jump_end.z = next_first.z;
-                jump_end.a = next_first.a;
-                jump_end.b = next_first.b;
-                jump_end.grayscale = next_first.grayscale;
+                copyPointCoord(jump_end, next_first);
                 jump_end.laser = 0;
-                
+
                 jump_segment.points.push_back(std::move(jump_start));
                 jump_segment.points.push_back(std::move(jump_end));
-                
+
                 new_segments.push_back(std::move(jump_segment));
             }
         }
     }
-    
-    // 使用移动语义替换 segments
+
     job.segments = std::move(new_segments);
     spdlog::info("添加跳线段完成，总段数: {}", job.segments.size());
 }
 
-void PathPlanner::applyCornerDeceleration(LaserJob& job, double threshold_angle) {
+void PathPlanner::applyCornerDeceleration(LaserJob& job, double threshold_angle)
+{
     const double threshold_rad = threshold_angle * M_PI / 180.0;
-    
+
     for (auto& segment : job.segments) {
         if (segment.type != SegmentType::MARK || segment.points.size() < 3) {
             continue;
@@ -139,26 +156,23 @@ void PathPlanner::applyCornerDeceleration(LaserJob& job, double threshold_angle)
             const auto& p0 = segment.points[i - 1];
             const auto& p1 = segment.points[i];
             const auto& p2 = segment.points[i + 1];
-            
-            // 计算角度
-            double dx1 = p1.x - p0.x;
-            double dy1 = p1.y - p0.y;
-            double dz1 = p1.z - p0.z;
-            
-            double dx2 = p2.x - p1.x;
-            double dy2 = p2.y - p1.y;
-            double dz2 = p2.z - p1.z;
-            
-            double len1 = std::sqrt(dx1 * dx1 + dy1 * dy1 + dz1 * dz1);
-            double len2 = std::sqrt(dx2 * dx2 + dy2 * dy2 + dz2 * dz2);
-            
-            if (len1 < 1e-9 || len2 < 1e-9) continue;
-            
+
+            const double dx1 = p1.x - p0.x;
+            const double dy1 = p1.y - p0.y;
+            const double dz1 = p1.z - p0.z;
+            const double dx2 = p2.x - p1.x;
+            const double dy2 = p2.y - p1.y;
+            const double dz2 = p2.z - p1.z;
+
+            const double len1 = std::sqrt(dx1 * dx1 + dy1 * dy1 + dz1 * dz1);
+            const double len2 = std::sqrt(dx2 * dx2 + dy2 * dy2 + dz2 * dz2);
+            if (len1 < 1e-9 || len2 < 1e-9) {
+                continue;
+            }
+
             double dot = (dx1 * dx2 + dy1 * dy2 + dz1 * dz2) / (len1 * len2);
-            dot = std::max(-1.0, std::min(1.0, dot));  // 限制范围
-            double angle = std::acos(dot);
-            
-            // 如果角度小于阈值，减速
+            dot = std::clamp(dot, -1.0, 1.0);
+            const double angle = std::acos(dot);
             if (angle < threshold_rad) {
                 if (!segment.points[i].params_override) {
                     segment.points[i].params_override = std::make_unique<ProcessParams>();
@@ -169,27 +183,28 @@ void PathPlanner::applyCornerDeceleration(LaserJob& job, double threshold_angle)
     }
 }
 
-void PathPlanner::sparsifyParams(LaserJob& job) {
-    // 参数稀疏化：将点级参数压缩为段级
-    // 简化实现：如果段内大部分点的参数相同，则提升为段级参数
+void PathPlanner::sparsifyParams(LaserJob& job)
+{
     for (auto& segment : job.segments) {
-        if (segment.points.empty()) continue;
-        
-        // 统计参数分布
-        // 简化实现，完整实现需要更复杂的统计
+        if (segment.points.empty()) {
+            continue;
+        }
+
+        const ProcessParams* first_params = segment.points.front().params_override.get();
+        if (!first_params) {
+            continue;
+        }
+
         bool all_same = true;
-        const ProcessParams* first_params = segment.points[0].params_override.get();
-        
         for (size_t i = 1; i < segment.points.size(); ++i) {
             const ProcessParams* params = segment.points[i].params_override.get();
-            if (params != first_params) {
+            if (!params || !sameProcessParams(*first_params, *params)) {
                 all_same = false;
                 break;
             }
         }
-        
-        // 如果所有点参数相同，提升为段级参数
-        if (all_same && first_params) {
+
+        if (all_same) {
             segment.params_override = std::make_unique<ProcessParams>(*first_params);
             for (auto& point : segment.points) {
                 point.params_override.reset();
@@ -198,10 +213,89 @@ void PathPlanner::sparsifyParams(LaserJob& job) {
     }
 }
 
-void PathPlanner::optimizePathOrder(LaserJob& job) {
-    // 路径排序优化（简化实现）
-    // 完整实现可以使用TSP算法或最近邻算法
-    spdlog::info("路径排序优化完成");
+void PathPlanner::optimizePathOrder(LaserJob& job)
+{
+    if (!job.grayscale_enabled) {
+        spdlog::info("路径排序优化跳过: 未启用灰度分区");
+        return;
+    }
+
+    for (size_t i = 0; i < job.segments.size(); ++i) {
+        job.segments[i].id = static_cast<int>(i);
+    }
+
+    std::stable_sort(job.segments.begin(), job.segments.end(),
+                     [](const PathSegment& a, const PathSegment& b) {
+                         const int a_bucket = segmentSortBucket(a);
+                         const int b_bucket = segmentSortBucket(b);
+                         if (a_bucket != b_bucket) {
+                             return a_bucket < b_bucket;
+                         }
+                         return a.id < b.id;
+                     });
+
+    spdlog::info("路径排序优化完成: 灰度分区低->高，SVG边界最后");
 }
 
-} // namespace nbcam
+double PathPlanner::bucketToPower(int bucket, double min_power_w, double max_power_w, double gamma)
+{
+    const double lo = std::min(min_power_w, max_power_w);
+    const double hi = std::max(min_power_w, max_power_w);
+    const double g = (std::isfinite(gamma) && gamma > 1e-9) ? gamma : 1.0;
+    const double gray = bucketToGray01(bucket);
+    const double shaped = std::pow(gray, g);
+    return lo + shaped * (hi - lo);
+}
+
+void PathPlanner::assignGrayscaleBuckets(LaserJob& job, double min_power_w, double max_power_w, double gamma)
+{
+    if (!job.grayscale_enabled) {
+        return;
+    }
+
+    const double lo = std::min(min_power_w, max_power_w);
+    const double hi = std::max(min_power_w, max_power_w);
+    job.grayscale_power_min_w = lo;
+    job.grayscale_power_max_w = hi;
+    job.grayscale_gamma = (std::isfinite(gamma) && gamma > 1e-9) ? gamma : 1.0;
+
+    for (auto& segment : job.segments) {
+        if (segment.type != SegmentType::MARK || segment.points.empty()) {
+            continue;
+        }
+
+        if (segment.svg_boundary) {
+            segment.grayscale_bucket = kBoundaryBucket;
+            for (auto& point : segment.points) {
+                point.grayscale = 1.0;
+            }
+        } else if (segment.grayscale_bucket < 0) {
+            segment.grayscale_bucket = segmentSortBucket(segment);
+        }
+
+        const double gray01 = (segment.grayscale_bucket >= kBoundaryBucket)
+                                  ? 1.0
+                                  : bucketToGray01(segment.grayscale_bucket);
+        const double power_w = bucketToPower(segment.grayscale_bucket, lo, hi, job.grayscale_gamma);
+
+        ProcessParams params = segment.params_override ? *segment.params_override : job.process_defaults;
+        params.power_w = power_w;
+        params.grayscale = gray01;
+        segment.params_override = std::make_unique<ProcessParams>(params);
+
+        for (auto& point : segment.points) {
+            point.grayscale = segment.svg_boundary ? 1.0 : std::clamp(point.grayscale, 0.0, 1.0);
+            if (point.params_override) {
+                point.params_override->power_w = power_w;
+                point.params_override->grayscale = gray01;
+            }
+        }
+    }
+
+    spdlog::info("灰度变功率分区完成: P=[{:.3f},{:.3f}]W, gamma={:.3f}, bucket=10灰度/区",
+                 lo,
+                 hi,
+                 job.grayscale_gamma);
+}
+
+}  // namespace nbcam

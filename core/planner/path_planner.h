@@ -25,6 +25,10 @@ public:
     
     // 路径排序优化
     void optimizePathOrder(LaserJob& job);
+
+    // 灰度分区与变功率加工
+    void assignGrayscaleBuckets(LaserJob& job, double min_power_w, double max_power_w, double gamma = 1.0);
+    static double bucketToPower(int bucket, double min_power_w, double max_power_w, double gamma = 1.0);
 };
 
 } // namespace nbcam

@@ -460,6 +460,7 @@ int runCliMode()
             const bool imported = (args.size() >= 3)
                 ? controller.importSVGWithTiling(path.toStdString(), tile_u, tile_v, {})
                 : controller.importSVG(path.toStdString(), 0.5, 0.5, 0.9);
+            controller.setGrayscalePowerRange(0.0, 20.0, 1.0);
             out << (imported ? "OK " : "FAIL ")
                 << "import_svg " << path << Qt::endl;
             continue;

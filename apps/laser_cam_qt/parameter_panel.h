@@ -20,6 +20,8 @@ public:
 
     // Getter方法（返回标准单位的值）
     double getPower() const;  // 返回W
+    double getGrayscalePowerMin() const;  // 返回W
+    double getGrayscalePowerMax() const;  // 返回W
     double getFreq() const;   // 返回Hz
     double getSpeed() const;  // 返回mm/s
     double getSpacing() const; // 返回mm
@@ -75,6 +77,8 @@ private:
     
     // 全局参数
     QDoubleSpinBox* power_spinbox_;
+    QDoubleSpinBox* grayscale_power_min_spinbox_;
+    QDoubleSpinBox* grayscale_power_max_spinbox_;
     QDoubleSpinBox* freq_spinbox_;
     QDoubleSpinBox* speed_spinbox_;
     

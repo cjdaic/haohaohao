@@ -73,6 +73,8 @@ struct PathSegment {
     int id = 0;
     SegmentType type = SegmentType::MARK;
     FillStrategy strategy = FillStrategy::CONTOUR;
+    int grayscale_bucket = -1;       // 灰度分区，0..25=内部区域，26=SVG外边界/最大灰度
+    bool svg_boundary = false;       // true表示SVG外边界段，规划时排在最后
     
     // 段级参数覆盖
     std::unique_ptr<ProcessParams> params_override;

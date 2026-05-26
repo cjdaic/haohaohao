@@ -48,6 +48,21 @@ void ParameterPanel::setupUI()
     power_unit_combo_->setCurrentIndex(0);
     power_layout->addWidget(power_unit_combo_);
     global_layout->addRow("功率:", power_layout);
+
+    QHBoxLayout* grayscale_power_layout = new QHBoxLayout();
+    grayscale_power_min_spinbox_ = new QDoubleSpinBox(this);
+    grayscale_power_min_spinbox_->setRange(0.0, 100000.0);
+    grayscale_power_min_spinbox_->setValue(0.0);
+    grayscale_power_min_spinbox_->setDecimals(3);
+    grayscale_power_layout->addWidget(grayscale_power_min_spinbox_);
+
+    grayscale_power_max_spinbox_ = new QDoubleSpinBox(this);
+    grayscale_power_max_spinbox_->setRange(0.0, 100000.0);
+    grayscale_power_max_spinbox_->setValue(20.0);
+    grayscale_power_max_spinbox_->setDecimals(3);
+    grayscale_power_layout->addWidget(grayscale_power_max_spinbox_);
+
+    global_layout->addRow("灰度功率区间(W, 0/256):", grayscale_power_layout);
     
     // 频率
     QHBoxLayout* freq_layout = new QHBoxLayout();
@@ -168,6 +183,16 @@ void ParameterPanel::setupUnitConversion()
 double ParameterPanel::getPower() const
 {
     return convertPowerToW(power_spinbox_->value(), power_unit_combo_->currentIndex());
+}
+
+double ParameterPanel::getGrayscalePowerMin() const
+{
+    return grayscale_power_min_spinbox_ ? grayscale_power_min_spinbox_->value() : 0.0;
+}
+
+double ParameterPanel::getGrayscalePowerMax() const
+{
+    return grayscale_power_max_spinbox_ ? grayscale_power_max_spinbox_->value() : 0.0;
 }
 
 double ParameterPanel::getFreq() const
