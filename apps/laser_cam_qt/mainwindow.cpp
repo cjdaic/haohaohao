@@ -134,8 +134,6 @@ nbcam::PathSegment clonePathSegmentDeep(const nbcam::PathSegment& src, int id)
     dst.id = id;
     dst.type = src.type;
     dst.strategy = src.strategy;
-    dst.grayscale_bucket = src.grayscale_bucket;
-    dst.svg_boundary = src.svg_boundary;
     if (src.params_override) {
         dst.params_override = std::make_unique<nbcam::ProcessParams>(*src.params_override);
     }
@@ -153,11 +151,6 @@ std::unique_ptr<nbcam::LaserJob> cloneLaserJobDeep(const nbcam::LaserJob& src)
     dst->coordinate = src.coordinate;
     dst->parameterization = src.parameterization;
     dst->process_defaults = src.process_defaults;
-    dst->grayscale_enabled = src.grayscale_enabled;
-    dst->grayscale_power_min_w = src.grayscale_power_min_w;
-    dst->grayscale_power_max_w = src.grayscale_power_max_w;
-    dst->grayscale_gamma = src.grayscale_gamma;
-    dst->grayscale_source = src.grayscale_source;
     dst->segments.reserve(src.segments.size());
     for (const auto& seg : src.segments) {
         dst->segments.push_back(clonePathSegmentDeep(seg, static_cast<int>(dst->segments.size())));
@@ -4765,10 +4758,7 @@ void MainWindow::importSVG()
                     spdlog::warn("SVG导入: 工艺参数分配失败，继续使用默认参数");
                 }
 
-                controller_->setGrayscalePowerRange(
-                    parameter_panel_ ? parameter_panel_->getGrayscalePowerMin() : 0.0,
-                    parameter_panel_ ? parameter_panel_->getGrayscalePowerMax() : 20.0,
-                    1.0);
+                controller_->setGrayscalePowerRange(0.0, 100.0, 1.0);
                 const bool planned = controller_->planPath(false);
                 if (!planned) {
                     QMessageBox::warning(this, "警告", "SVG已导入，但模型路径规划失败！");
