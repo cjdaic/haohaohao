@@ -1,0 +1,10 @@
+2024-09-26T16:42:40.853072900255-16:42:40 **** Incremental Build of configuration Debug for project dmalwip_system ****
+000-make all 
+000-Generating bif file for the system project
+000-generate_system_bif.bat 59402 Z:/vitis_poject/202409261/tsktcp/export/tsktcp/tsktcp.xpfm freertos10_xilinx_domain Z:/vitis_poject/202409261/dmalwip_system/Debug/system.bif
+000-sdcard_gen --xpfm Z:/vitis_poject/202409261/tsktcp/export/tsktcp/tsktcp.xpfm --sys_config tsktcp --bif Z:/vitis_poject/202409261/dmalwip_system/Debug/system.bif --bitstream Z:/vitis_poject/202409261/dmalwip/_ide/bitstream/design_1_wrapper_2.bit --elf Z:/vitis_poject/202409261/dmalwip/Debug/dmalwip.elf,ps7_cortexa9_0
+000-creating BOOT.BIN using Z:/vitis_poject/202409261/dmalwip/_ide/bitstream/design_1_wrapper_2.bit
+000-Running C:/Xilinx/Vitis/2020.2/bin/bootgen  -image Z:/vitis_poject/202409261/dmalwip_system/Debug/sd_card_temp/boot.bif -w -o i BOOT.BIN
+00255-
+16:42:44 Build Finished (took 3s.529ms)
+

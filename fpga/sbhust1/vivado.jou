@@ -1,0 +1,19 @@
+#-----------------------------------------------------------
+# Vivado v2020.2 (64-bit)
+# SW Build 3064766 on Wed Nov 18 09:12:45 MST 2020
+# IP Build 3064653 on Wed Nov 18 14:17:31 MST 2020
+# Start of session at: Wed Apr 12 15:35:06 2023
+# Process ID: 8020
+# Current directory: D:/Desktop/FPGA/project_to_luwangrong
+# Command line: vivado.exe -gui_launcher_event rodinguilauncherevent5364 D:\Desktop\FPGA\project_to_luwangrong\project_to_luwangrong.xpr
+# Log file: D:/Desktop/FPGA/project_to_luwangrong/vivado.log
+# Journal file: D:/Desktop/FPGA/project_to_luwangrong\vivado.jou
+#-----------------------------------------------------------
+start_gui
+open_project D:/Desktop/FPGA/project_to_luwangrong/project_to_luwangrong.xpr
+update_compile_order -fileset sources_1
+reset_run synth_1
+launch_runs impl_1 -to_step write_bitstream -jobs 10
+wait_on_run impl_1
+open_bd_design {D:/Desktop/FPGA/project_to_luwangrong/project_to_luwangrong.srcs/sources_1/bd/design_1/design_1.bd}
+open_bd_design {D:/Desktop/FPGA/project_to_luwangrong/project_to_luwangrong.srcs/sources_1/bd/design_1/design_1.bd}

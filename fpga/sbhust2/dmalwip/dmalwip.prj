@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="ASCII"?>
+<sdkproject:SdkProject xmi:version="2.0" xmlns:xmi="http://www.omg.org/XMI" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:sdkproject="http://www.xilinx.com/sdkproject" name="dmalwip" location="D:/biye2/scanner/scanner.vitis/dmalwip" platform="D:/biye2/scanner/scanner.vitis/tsktcp/export/tsktcp/tsktcp.xpfm" platformUID="xilinx:::0.0(custom)" systemProject="dmalwip_system" sysConfig="tsktcp" runtime="C/C++" cpu="freertos10_xilinx_domain" cpuInstance="ps7_cortexa9_0" os="freertos10_xilinx" language="CPP" mssSignature="c4f4c108495fbcbdacea0d05b9f48187">
+  <configuration name="Debug" id="xilinx.gnu.armv7.exe.debug.855635256">
+    <configBuildOptions xsi:type="sdkproject:SdkOptions"/>
+    <lastBuildOptions xsi:type="sdkproject:SdkOptions"/>
+  </configuration>
+  <configuration name="Release" id="xilinx.gnu.armv7.exe.release.554125893" dirty="true">
+    <configBuildOptions xsi:type="sdkproject:SdkOptions"/>
+  </configuration>
+  <template appTemplateName="empty_application"/>
+</sdkproject:SdkProject>
