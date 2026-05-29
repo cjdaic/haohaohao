@@ -817,6 +817,7 @@ MainWindow::MainWindow(QWidget *parent)
     , exit_action_(nullptr)
     , about_action_(nullptr)
     , parameterization_group_(nullptr)
+    , param_abf_action_(nullptr)
     , param_lscm_action_(nullptr)
     , param_arap_action_(nullptr)
     , wireframe_3d_action_(nullptr)
@@ -1382,6 +1383,7 @@ void MainWindow::resetMachiningProgress()
     machining_completed_segment_ids_.clear();
     emergency_stop_requested_ = false;
     machining_refresh_available_ = false;
+    machining_requires_refresh_before_resume_ = false;
     applyHighlightedSegmentIds(QSet<int>{});
 }
 
@@ -1863,7 +1865,7 @@ bool MainWindow::sendCurrentMachiningFrame(QString* out_error)
     return true;
 }
 
-bool MainWindow::flushMachiningTransportTail(QString* out_error)
+bool MainWindow::queueMachiningTransportTail(QString* out_error)
 {
     if (is_simulation_mode_) {
         return true;
@@ -1894,6 +1896,21 @@ bool MainWindow::flushMachiningTransportTail(QString* out_error)
     }
 
     machining_data_buffer_->forceFill();
+    return true;
+}
+
+bool MainWindow::waitForMachiningTransportDrained(QString* out_error)
+{
+    if (is_simulation_mode_) {
+        return true;
+    }
+    if (!machining_data_buffer_) {
+        if (out_error) {
+            *out_error = "双缓冲发送器未初始化。";
+        }
+        return false;
+    }
+
     const auto timeout = std::chrono::milliseconds(std::max(5000, comm_config_.tcp_io_timeout_ms * 50));
     if (!machining_data_buffer_->waitUntilIdle(timeout)) {
         if (out_error) {
@@ -1907,6 +1924,56 @@ bool MainWindow::flushMachiningTransportTail(QString* out_error)
     }
 
     spdlog::info("Machining transport tail flushed: state={}, feedback={}",
+                 machining_data_buffer_->describeState(),
+                 machining_data_buffer_->getLastTransportFeedback());
+    return true;
+}
+
+bool MainWindow::flushMachiningTransportTail(QString* out_error)
+{
+    if (!queueMachiningTransportTail(out_error)) {
+        return false;
+    }
+    return waitForMachiningTransportDrained(out_error);
+}
+
+bool MainWindow::sendMachiningLaserOffFrame(QString* out_error)
+{
+    if (is_simulation_mode_) {
+        return true;
+    }
+    if (!validateTcpTargetForMachining(out_error)) {
+        return false;
+    }
+
+    if (machining_data_buffer_) {
+        machining_data_buffer_->stopTcpThread();
+    }
+    machining_data_buffer_ = std::make_unique<nbcam::DataBuffer>();
+
+    if (!ensureMachiningTransportConnected(out_error)) {
+        return false;
+    }
+
+    const QByteArray payload =
+        packFrameBytes(0, 0, 0, 0, 0, 0x1100, 0, 0) +
+        packFrameBytes(0, 0, 0, 0, 0, 0x0000, 0, 0) +
+        packFrameBytes(0, 0, 0, 0, 0, 0x1100, 0, 0);
+
+    machining_data_buffer_->appendBytes(payload.constData(), static_cast<size_t>(payload.size()));
+    machining_data_buffer_->forceFill();
+    if (!machining_data_buffer_->waitUntilIdle(std::chrono::milliseconds(std::max(1000, comm_config_.tcp_io_timeout_ms * 10)))) {
+        if (out_error) {
+            const QString feedback = QString::fromStdString(machining_data_buffer_->getLastTransportFeedback());
+            const QString state = QString::fromStdString(machining_data_buffer_->describeState());
+            *out_error = QString("关光数据帧已写入本地缓冲，但发送线程未在超时时间内排空。状态=%1%2")
+                             .arg(state)
+                             .arg(feedback.isEmpty() ? QString() : QString("，反馈=%1").arg(feedback));
+        }
+        return false;
+    }
+
+    spdlog::info("Machining laser-off frame sent: state={}, feedback={}",
                  machining_data_buffer_->describeState(),
                  machining_data_buffer_->getLastTransportFeedback());
     return true;
@@ -2069,6 +2136,10 @@ void MainWindow::onStartMachining()
     }
 
     if (machining_run_state_ == MachiningRunState::Paused) {
+        if (machining_requires_refresh_before_resume_) {
+            QMessageBox::warning(this, "开始加工", "暂停时已执行关光并丢弃本地发送队列，请先刷新回起始数据帧后再重新开始。");
+            return;
+        }
         machining_run_state_ = MachiningRunState::Running;
         machining_refresh_available_ = false;
         spdlog::info("Machining resume: mode={}, laser_output={}, next_batch={}/{}",
@@ -2119,17 +2190,26 @@ void MainWindow::onPauseMachining()
     if (machining_run_state_ != MachiningRunState::Running) {
         return;
     }
-    machining_run_state_ = MachiningRunState::Paused;
-    machining_refresh_available_ = true;
     if (machining_timer_) {
         machining_timer_->stop();
     }
+    QString laser_off_error;
+    const bool laser_off_ok = sendMachiningLaserOffFrame(&laser_off_error);
+    machining_run_state_ = MachiningRunState::Paused;
+    machining_refresh_available_ = true;
+    machining_requires_refresh_before_resume_ = !is_simulation_mode_;
     spdlog::info("Machining pause: mode={}, current_batch={}/{}",
                  is_simulation_mode_ ? "simulate" : "live",
                  machining_batch_index_,
                  machining_plan_.batches.size());
     updateMachiningUiState();
-    statusBar()->showMessage("加工已暂停", 3000);
+    if (!laser_off_ok) {
+        spdlog::warn("Machining pause laser-off failed: {}", laser_off_error.toStdString());
+        QMessageBox::warning(this, "暂停", QString("加工已暂停，但关光帧发送失败：%1").arg(laser_off_error));
+        statusBar()->showMessage("加工已暂停，但关光帧发送失败", 5000);
+        return;
+    }
+    statusBar()->showMessage(is_simulation_mode_ ? "加工已暂停" : "加工已暂停，已发送关光帧，请刷新后重新开始", 5000);
 }
 
 void MainWindow::onEmergencyStop()
@@ -2139,15 +2219,16 @@ void MainWindow::onEmergencyStop()
                  is_simulation_mode_ ? "simulate" : "live",
                  machining_batch_index_,
                  machining_plan_.batches.size());
-    if (machining_data_buffer_) {
-        // 预留激光器关光/关快门命令位置。
-        machining_data_buffer_->stopTcpThread();
+    QString laser_off_error;
+    const bool laser_off_ok = sendMachiningLaserOffFrame(&laser_off_error);
+    if (!laser_off_ok) {
+        spdlog::warn("Machining emergency-stop laser-off failed: {}", laser_off_error.toStdString());
     }
 
     stopMachiningSession(true, true, true);
     machining_refresh_available_ = true;
     updateMachiningUiState();
-    statusBar()->showMessage("已急停，数据帧发送已停止", 5000);
+    statusBar()->showMessage(laser_off_ok ? "已急停，已发送关光帧" : "已急停，但关光帧发送失败", 5000);
 }
 
 void MainWindow::onRefreshMachining()
@@ -2294,7 +2375,7 @@ void MainWindow::processMachiningStep()
     if (machining_timer_) {
         const int next_interval_ms = is_simulation_mode_
                                          ? 0
-                                         : std::max(1, static_cast<int>((batch.duration_us + 999) / 1000));
+                                         : 0;
         machining_timer_->start(next_interval_ms);
     }
     updateMachiningUiState();
@@ -4586,7 +4667,7 @@ void MainWindow::openModel()
         this,
         "打开模型文件",
         "",
-        "模型文件 (*.obj *.stl);;所有文件(*.*)"
+        "模型文件 (*.obj *.stl *.sldprt);;OBJ文件 (*.obj);;STL文件 (*.stl);;SolidWorks零件 (*.sldprt);;所有文件(*.*)"
     );
     
     if (!fileName.isEmpty()) {
@@ -4646,8 +4727,10 @@ void MainWindow::parameterize()
     }
     
     // 获取当前选择的算法
-    std::string algorithm = "LSCM";
-    if (param_arap_action_ && param_arap_action_->isChecked()) {
+    std::string algorithm = "ABF";
+    if (param_lscm_action_ && param_lscm_action_->isChecked()) {
+        algorithm = "LSCM";
+    } else if (param_arap_action_ && param_arap_action_->isChecked()) {
         algorithm = "ARAP";
     }
     
@@ -5462,11 +5545,13 @@ void MainWindow::parameterizeSelectedPatch()
     
     QVBoxLayout* layout = new QVBoxLayout(&dialog);
     
+    QRadioButton* abf_radio = new QRadioButton("ABF (角度基准展开)", &dialog);
     QRadioButton* lscm_radio = new QRadioButton("LSCM (最小二乘保形映射)", &dialog);
     QRadioButton* arap_radio = new QRadioButton("ARAP (尽可能刚性)", &dialog);
     QRadioButton* authalic_radio = new QRadioButton("Authalic (保面积优先)", &dialog);
-    arap_radio->setChecked(true);  // 默认选择ARAP（验证示例流程）
+    abf_radio->setChecked(true);
     
+    layout->addWidget(abf_radio);
     layout->addWidget(lscm_radio);
     layout->addWidget(arap_radio);
     layout->addWidget(authalic_radio);
@@ -5481,14 +5566,17 @@ void MainWindow::parameterizeSelectedPatch()
     }
     
     // 确定选择的算法
-    std::string algorithm = "ARAP";
+    std::string algorithm = "ABF";
     if (lscm_radio->isChecked()) {
         algorithm = "LSCM";
+    } else if (arap_radio->isChecked()) {
+        algorithm = "ARAP";
     } else if (authalic_radio->isChecked()) {
         algorithm = "AUTHALIC";
     }
     const QString algorithm_label =
-        (algorithm == "LSCM") ? "LSCM" : ((algorithm == "AUTHALIC") ? "Authalic" : "ARAP");
+        (algorithm == "ABF") ? "ABF" :
+        ((algorithm == "LSCM") ? "LSCM" : ((algorithm == "AUTHALIC") ? "Authalic" : "ARAP"));
     
     QString progress_text = QString("正在对面片 %1 进行参数化（%2）...")
         .arg(patch_id)

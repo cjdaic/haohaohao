@@ -205,6 +205,7 @@ private:
     void applyMachiningProgressHighlight(int current_segment_id);
     void resetMachiningProgress();
     void stopMachiningSession(bool reset_to_start, bool disconnect_socket, bool keep_simulate_toggle = false);
+    bool sendMachiningLaserOffFrame(QString* out_error);
     bool sendMachiningResetToStartFrame(QString* out_error);
     bool prepareMachiningPlan(QString* out_error);
     bool validateActiveJobForMachining(QString* out_error) const;
@@ -213,6 +214,8 @@ private:
     bool validateTcpTargetForMachining(QString* out_error) const;
     bool ensureMachiningTransportConnected(QString* out_error);
     bool sendCurrentMachiningFrame(QString* out_error);
+    bool queueMachiningTransportTail(QString* out_error);
+    bool waitForMachiningTransportDrained(QString* out_error);
     bool flushMachiningTransportTail(QString* out_error);
     void updateMachiningUiState();
 
@@ -271,6 +274,7 @@ private:
     
     // 参数化算法动作组
     QActionGroup* parameterization_group_;
+    QAction* param_abf_action_;
     QAction* param_lscm_action_;
     QAction* param_arap_action_;
     
@@ -387,6 +391,7 @@ private:
     bool ignore_simulation_toggle_signal_ = false;
     bool machining_laser_output_enabled_ = false;
     bool machining_segment_feedback_enabled_ = false;
+    bool machining_requires_refresh_before_resume_ = false;
     spdlog::level::level_enum machining_previous_log_level_ = spdlog::level::info;
     bool machining_log_level_overridden_ = false;
 

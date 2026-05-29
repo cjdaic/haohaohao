@@ -52,6 +52,19 @@ find_package(gRPC REQUIRED)
 find_package(Protobuf REQUIRED)
 find_package(Threads REQUIRED)
 
+if(NOT Eigen3_DIR OR Eigen3_DIR MATCHES "NOTFOUND")
+    set(_eigen3_config_hints
+        "D:/vcpkg/installed/x64-windows/share/eigen3"
+        "${CMAKE_SOURCE_DIR}/vcpkg_installed/x64-windows/share/eigen3")
+    foreach(_eigen3_hint IN LISTS _eigen3_config_hints)
+        if(EXISTS "${_eigen3_hint}/Eigen3Config.cmake")
+            set(Eigen3_DIR "${_eigen3_hint}" CACHE PATH "Eigen3 CMake config directory" FORCE)
+            break()
+        endif()
+    endforeach()
+endif()
+find_package(Eigen3 REQUIRED)
+
 # vcpkg管理的依赖
 find_package(nlohmann_json REQUIRED)
 find_package(spdlog REQUIRED)

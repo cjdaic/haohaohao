@@ -39,7 +39,7 @@ public:
     MeshIO() = default;
     ~MeshIO() = default;
     
-    // 从文件加载网格（OBJ/STL）
+    // 从文件加载网格（OBJ/STL/SLDPRT）
     std::unique_ptr<TriangleMesh> loadFromFile(const std::string& filepath);
     
     // 保存网格到文件
@@ -50,6 +50,9 @@ public:
     
     // 从STL格式加载
     std::unique_ptr<TriangleMesh> loadSTL(const std::string& filepath);
+
+    // 从SolidWorks零件格式加载（Windows上通过本机SolidWorks导出临时STL）
+    std::unique_ptr<TriangleMesh> loadSLDPRT(const std::string& filepath);
     
     // 保存为OBJ格式
     bool saveOBJ(const TriangleMesh& mesh, const std::string& filepath);

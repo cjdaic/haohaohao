@@ -258,7 +258,7 @@ void printCliHelp(QTextStream& out)
     out << "  cd <path>" << Qt::endl;
     out << "  ls [path] / dir [path]" << Qt::endl;
     out << "  load_model <path>" << Qt::endl;
-    out << "  parameterize [LSCM|ARAP|AUTHALIC]" << Qt::endl;
+    out << "  parameterize [ABF|LSCM|ARAP|AUTHALIC]" << Qt::endl;
     out << "  import_svg <path> [tile_u tile_v]" << Qt::endl;
     out << "  generate_pattern <strategy> <spacing_mm> [angle_deg]" << Qt::endl;
     out << "  map_to_xyz" << Qt::endl;
@@ -276,7 +276,7 @@ void printCliHelp(QTextStream& out)
     out << Qt::endl;
     out << "Typical workflow:" << Qt::endl;
     out << "  load_model \"docs/model1111.STL\"" << Qt::endl;
-    out << "  parameterize LSCM" << Qt::endl;
+    out << "  parameterize ABF" << Qt::endl;
     out << "  import_svg \"docs/HUST.svg\"" << Qt::endl;
     out << "  map_to_xyz" << Qt::endl;
     out << "  assign_params curvature" << Qt::endl;
@@ -431,7 +431,7 @@ int runCliMode()
         }
 
         if (command == "parameterize") {
-            const QString algorithm = args.isEmpty() ? "LSCM" : args.front().trimmed().toUpper();
+            const QString algorithm = args.isEmpty() ? "ABF" : args.front().trimmed().toUpper();
             out << (controller.parameterizeMesh(algorithm.toStdString()) ? "OK " : "FAIL ")
                 << "parameterize " << algorithm << Qt::endl;
             continue;

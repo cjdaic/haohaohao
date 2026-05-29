@@ -16,7 +16,7 @@ public:
     // 对指定的patch进行参数化
     // mesh: 原始网格
     // patch: 要参数化的patch
-    // algorithm: 参数化算法 ("LSCM" / "ARAP" / "AUTHALIC")
+    // algorithm: 参数化算法 ("ABF" / "LSCM" / "ARAP" / "AUTHALIC")
     // 返回参数化结果，UV坐标索引对应patch子网格的顶点索引
     ParameterizationResult parameterizePatch(const TriangleMesh& mesh, const Patch& patch, const std::string& algorithm = "LSCM");
     

@@ -3,6 +3,8 @@ add_library(nbcam_param STATIC
     cgal_mesh_utils.h
     lscm_parameterizer.h
     lscm_parameterizer.cpp
+    abf_parameterizer.h
+    abf_parameterizer.cpp
     arap_parameterizer.h
     arap_parameterizer.cpp
     authalic_parameterizer.h
@@ -13,6 +15,7 @@ add_library(nbcam_param STATIC
 
 target_link_libraries(nbcam_param PUBLIC
     CGAL::CGAL
+    Eigen3::Eigen
     spdlog::spdlog
 )
 

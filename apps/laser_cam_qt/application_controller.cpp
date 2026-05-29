@@ -2,6 +2,7 @@
 
 #include "../core/mesh/mesh_preprocessor.h"
 #include "../core/param/patch_parameterizer.h"
+#include "../core/param/abf_parameterizer.h"
 #include "../core/pattern/contour_strategy.h"
 #include "../core/pattern/hatch_strategy.h"
 #include "../core/pattern/line_hatch_strategy.h"
@@ -3901,7 +3902,9 @@ bool ApplicationController::parameterizeMesh(const std::string& algorithm)
     }
 
     try {
-        if (algorithm == "LSCM") {
+        if (algorithm == "ABF") {
+            parameterizer_ = std::make_unique<nbcam::ABFParameterizer>();
+        } else if (algorithm == "LSCM") {
             parameterizer_ = std::make_unique<nbcam::LSCMParameterizer>();
         } else if (algorithm == "ARAP") {
             parameterizer_ = std::make_unique<nbcam::ARAPParameterizer>();
@@ -4645,7 +4648,9 @@ bool ApplicationController::generatePatternInPatch(int patch_id,
                 std::string alg_name = parameterizer_->getName();
                 std::transform(alg_name.begin(), alg_name.end(), alg_name.begin(),
                                [](unsigned char ch) { return static_cast<char>(std::toupper(ch)); });
-                if (alg_name.find("ARAP") != std::string::npos) {
+                if (alg_name.find("ABF") != std::string::npos) {
+                    patch_algorithm = "ABF";
+                } else if (alg_name.find("ARAP") != std::string::npos) {
                     patch_algorithm = "ARAP";
                 } else if (alg_name.find("AUTHALIC") != std::string::npos) {
                     patch_algorithm = "AUTHALIC";

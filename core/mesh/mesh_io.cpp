@@ -7,6 +7,16 @@
 #include <iomanip>
 #include <cstdint>
 #include <cmath>
+#include <filesystem>
+#include <chrono>
+#include <system_error>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#include <OleAuto.h>
+#endif
 
 namespace nbcam {
 
@@ -32,13 +42,21 @@ bool TriangleMesh::isValid() const {
 }
 
 std::unique_ptr<TriangleMesh> MeshIO::loadFromFile(const std::string& filepath) {
-    std::string ext = filepath.substr(filepath.find_last_of('.') + 1);
+    const auto dot_pos = filepath.find_last_of('.');
+    if (dot_pos == std::string::npos || dot_pos + 1 >= filepath.size()) {
+        spdlog::error("不支持的文件格式: {}", filepath);
+        return nullptr;
+    }
+
+    std::string ext = filepath.substr(dot_pos + 1);
     std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
     
     if (ext == "obj") {
         return loadOBJ(filepath);
     } else if (ext == "stl") {
         return loadSTL(filepath);
+    } else if (ext == "sldprt") {
+        return loadSLDPRT(filepath);
     } else {
         spdlog::error("不支持的文件格式: {}", ext);
         return nullptr;
@@ -46,7 +64,13 @@ std::unique_ptr<TriangleMesh> MeshIO::loadFromFile(const std::string& filepath) 
 }
 
 bool MeshIO::saveToFile(const TriangleMesh& mesh, const std::string& filepath) {
-    std::string ext = filepath.substr(filepath.find_last_of('.') + 1);
+    const auto dot_pos = filepath.find_last_of('.');
+    if (dot_pos == std::string::npos || dot_pos + 1 >= filepath.size()) {
+        spdlog::error("不支持的文件格式: {}", filepath);
+        return false;
+    }
+
+    std::string ext = filepath.substr(dot_pos + 1);
     std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
     
     if (ext == "obj") {
@@ -58,6 +82,586 @@ bool MeshIO::saveToFile(const TriangleMesh& mesh, const std::string& filepath) {
         return false;
     }
 }
+
+#ifdef _WIN32
+namespace {
+
+class ComApartment {
+public:
+    ComApartment()
+        : hr_(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED)),
+          needs_uninitialize_(SUCCEEDED(hr_))
+    {
+    }
+
+    ~ComApartment()
+    {
+        if (needs_uninitialize_) {
+            CoUninitialize();
+        }
+    }
+
+    bool isUsable() const
+    {
+        return SUCCEEDED(hr_) || hr_ == RPC_E_CHANGED_MODE;
+    }
+
+    HRESULT result() const { return hr_; }
+
+private:
+    HRESULT hr_ = E_FAIL;
+    bool needs_uninitialize_ = false;
+};
+
+class DispatchPtr {
+public:
+    DispatchPtr() = default;
+    explicit DispatchPtr(IDispatch* dispatch) : dispatch_(dispatch) {}
+
+    ~DispatchPtr()
+    {
+        reset();
+    }
+
+    DispatchPtr(const DispatchPtr&) = delete;
+    DispatchPtr& operator=(const DispatchPtr&) = delete;
+
+    DispatchPtr(DispatchPtr&& other) noexcept
+        : dispatch_(other.dispatch_)
+    {
+        other.dispatch_ = nullptr;
+    }
+
+    DispatchPtr& operator=(DispatchPtr&& other) noexcept
+    {
+        if (this != &other) {
+            reset(other.dispatch_);
+            other.dispatch_ = nullptr;
+        }
+        return *this;
+    }
+
+    IDispatch* get() const { return dispatch_; }
+    explicit operator bool() const { return dispatch_ != nullptr; }
+
+    void reset(IDispatch* dispatch = nullptr)
+    {
+        if (dispatch_) {
+            dispatch_->Release();
+        }
+        dispatch_ = dispatch;
+    }
+
+private:
+    IDispatch* dispatch_ = nullptr;
+};
+
+std::wstring toWideString(const std::string& value)
+{
+    if (value.empty()) {
+        return {};
+    }
+
+    const int required = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.c_str(), -1, nullptr, 0);
+    if (required <= 0) {
+        return {};
+    }
+
+    std::wstring wide(static_cast<size_t>(required - 1), L'\0');
+    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.c_str(), -1, wide.data(), required);
+    return wide;
+}
+
+std::string toUtf8String(const std::wstring& value)
+{
+    if (value.empty()) {
+        return {};
+    }
+
+    const int required = WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (required <= 0) {
+        return {};
+    }
+
+    std::string utf8(static_cast<size_t>(required - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, utf8.data(), required, nullptr, nullptr);
+    return utf8;
+}
+
+std::string bstrToUtf8(BSTR value)
+{
+    if (!value) {
+        return {};
+    }
+    return toUtf8String(std::wstring(value, SysStringLen(value)));
+}
+
+void initBstrVariant(VARIANT& variant, const std::wstring& value)
+{
+    VariantInit(&variant);
+    variant.vt = VT_BSTR;
+    variant.bstrVal = SysAllocStringLen(value.data(), static_cast<UINT>(value.size()));
+}
+
+void initIntVariant(VARIANT& variant, long value)
+{
+    VariantInit(&variant);
+    variant.vt = VT_I4;
+    variant.lVal = value;
+}
+
+void initBoolVariant(VARIANT& variant, bool value)
+{
+    VariantInit(&variant);
+    variant.vt = VT_BOOL;
+    variant.boolVal = value ? VARIANT_TRUE : VARIANT_FALSE;
+}
+
+void initIntByRefVariant(VARIANT& variant, long& value)
+{
+    VariantInit(&variant);
+    variant.vt = VT_BYREF | VT_I4;
+    variant.plVal = &value;
+}
+
+void initNullVariant(VARIANT& variant)
+{
+    VariantInit(&variant);
+    variant.vt = VT_NULL;
+}
+
+void clearVariants(VARIANT* variants, UINT count)
+{
+    if (!variants) {
+        return;
+    }
+    for (UINT i = 0; i < count; ++i) {
+        VariantClear(&variants[i]);
+    }
+}
+
+HRESULT invokeDispatch(IDispatch* dispatch,
+                       const wchar_t* name,
+                       WORD flags,
+                       VARIANT* reversed_args,
+                       UINT arg_count,
+                       VARIANT* result = nullptr,
+                       bool log_failure = true)
+{
+    if (!dispatch || !name) {
+        return E_POINTER;
+    }
+
+    DISPID dispid = 0;
+    LPOLESTR ole_name = const_cast<LPOLESTR>(name);
+    HRESULT hr = dispatch->GetIDsOfNames(IID_NULL, &ole_name, 1, LOCALE_USER_DEFAULT, &dispid);
+    if (FAILED(hr)) {
+        if (log_failure) {
+            spdlog::debug("SolidWorks COM: GetIDsOfNames failed for {} (hr=0x{:08X})",
+                          toUtf8String(name),
+                          static_cast<unsigned>(hr));
+        }
+        return hr;
+    }
+
+    DISPID property_put = DISPID_PROPERTYPUT;
+    DISPPARAMS params{};
+    params.rgvarg = reversed_args;
+    params.cArgs = arg_count;
+    if (flags & DISPATCH_PROPERTYPUT) {
+        params.rgdispidNamedArgs = &property_put;
+        params.cNamedArgs = 1;
+    }
+
+    EXCEPINFO excep{};
+    UINT arg_error = 0;
+    if (result) {
+        VariantInit(result);
+    }
+
+    hr = dispatch->Invoke(dispid,
+                          IID_NULL,
+                          LOCALE_USER_DEFAULT,
+                          flags,
+                          &params,
+                          result,
+                          &excep,
+                          &arg_error);
+
+    if (FAILED(hr) && log_failure) {
+        const std::string description = bstrToUtf8(excep.bstrDescription);
+        if (!description.empty()) {
+            spdlog::warn("SolidWorks COM: {} failed (hr=0x{:08X}, arg={}, {})",
+                         toUtf8String(name),
+                         static_cast<unsigned>(hr),
+                         arg_error,
+                         description);
+        } else {
+            spdlog::warn("SolidWorks COM: {} failed (hr=0x{:08X}, arg={})",
+                         toUtf8String(name),
+                         static_cast<unsigned>(hr),
+                         arg_error);
+        }
+    }
+
+    if (excep.bstrSource) {
+        SysFreeString(excep.bstrSource);
+    }
+    if (excep.bstrDescription) {
+        SysFreeString(excep.bstrDescription);
+    }
+    if (excep.bstrHelpFile) {
+        SysFreeString(excep.bstrHelpFile);
+    }
+    return hr;
+}
+
+DispatchPtr dispatchFromVariant(VARIANT& variant)
+{
+    if (variant.vt == VT_DISPATCH && variant.pdispVal) {
+        IDispatch* dispatch = variant.pdispVal;
+        variant.vt = VT_EMPTY;
+        variant.pdispVal = nullptr;
+        return DispatchPtr(dispatch);
+    }
+
+    if (variant.vt == VT_UNKNOWN && variant.punkVal) {
+        IDispatch* dispatch = nullptr;
+        if (SUCCEEDED(variant.punkVal->QueryInterface(IID_IDispatch, reinterpret_cast<void**>(&dispatch)))) {
+            return DispatchPtr(dispatch);
+        }
+    }
+
+    return {};
+}
+
+DispatchPtr getPropertyDispatch(IDispatch* dispatch, const wchar_t* name)
+{
+    VARIANT result;
+    const HRESULT hr = invokeDispatch(dispatch, name, DISPATCH_PROPERTYGET, nullptr, 0, &result);
+    if (FAILED(hr)) {
+        VariantClear(&result);
+        return {};
+    }
+
+    DispatchPtr property = dispatchFromVariant(result);
+    VariantClear(&result);
+    return property;
+}
+
+std::wstring getMethodString(IDispatch* dispatch, const wchar_t* name)
+{
+    VARIANT result;
+    const HRESULT hr = invokeDispatch(dispatch, name, DISPATCH_METHOD, nullptr, 0, &result, false);
+    if (FAILED(hr) || result.vt != VT_BSTR) {
+        VariantClear(&result);
+        return {};
+    }
+
+    std::wstring value(result.bstrVal, SysStringLen(result.bstrVal));
+    VariantClear(&result);
+    return value;
+}
+
+bool setBoolProperty(IDispatch* dispatch, const wchar_t* name, bool value)
+{
+    VARIANT arg;
+    initBoolVariant(arg, value);
+    const HRESULT hr = invokeDispatch(dispatch, name, DISPATCH_PROPERTYPUT, &arg, 1, nullptr, false);
+    VariantClear(&arg);
+    return SUCCEEDED(hr);
+}
+
+bool variantIndicatesSuccess(const VARIANT& variant)
+{
+    if (variant.vt == VT_BOOL) {
+        return variant.boolVal == VARIANT_TRUE;
+    }
+    if (variant.vt == VT_I4) {
+        return variant.lVal != 0;
+    }
+    if (variant.vt == VT_EMPTY || variant.vt == VT_NULL) {
+        return true;
+    }
+    return false;
+}
+
+long variantToLong(const VARIANT& variant, long fallback = 0)
+{
+    if (variant.vt == VT_I4) {
+        return variant.lVal;
+    }
+    if (variant.vt == VT_I2) {
+        return variant.iVal;
+    }
+    if (variant.vt == VT_INT) {
+        return variant.intVal;
+    }
+    if (variant.vt == VT_UI4) {
+        return static_cast<long>(variant.ulVal);
+    }
+    if (variant.vt == VT_R8) {
+        return static_cast<long>(variant.dblVal);
+    }
+    return fallback;
+}
+
+long getSolidWorksDocUnitCode(IDispatch* model_doc)
+{
+    VARIANT result;
+    const HRESULT hr = invokeDispatch(model_doc, L"GetUnits", DISPATCH_METHOD, nullptr, 0, &result, false);
+    if (FAILED(hr) || !(result.vt & VT_ARRAY) || !result.parray) {
+        VariantClear(&result);
+        return -1;
+    }
+
+    long lower_bound = 0;
+    long upper_bound = -1;
+    SafeArrayGetLBound(result.parray, 1, &lower_bound);
+    SafeArrayGetUBound(result.parray, 1, &upper_bound);
+    if (upper_bound < lower_bound) {
+        VariantClear(&result);
+        return -1;
+    }
+
+    VARIANT item;
+    VariantInit(&item);
+    long index = lower_bound;
+    const HRESULT item_hr = SafeArrayGetElement(result.parray, &index, &item);
+    const long unit_code = SUCCEEDED(item_hr) ? variantToLong(item, -1) : -1;
+    VariantClear(&item);
+    VariantClear(&result);
+    return unit_code;
+}
+
+double solidWorksLengthUnitToMillimeters(long unit_code)
+{
+    switch (unit_code) {
+    case 0: return 25.4;    // inches
+    case 1: return 304.8;   // feet
+    case 2: return 1000.0;  // meters
+    case 3: return 10.0;    // centimeters
+    case 4: return 1.0;     // millimeters
+    case 5: return 1e-3;    // microns
+    case 6: return 1e-6;    // nanometers
+    default:
+        return 1.0;
+    }
+}
+
+void scaleMesh(nbcam::TriangleMesh& mesh, double scale)
+{
+    if (!std::isfinite(scale) || std::abs(scale - 1.0) < 1e-12) {
+        return;
+    }
+
+    for (auto& vertex : mesh.vertices) {
+        vertex.x *= scale;
+        vertex.y *= scale;
+        vertex.z *= scale;
+    }
+}
+
+bool activateSolidWorksDocument(IDispatch* solidworks_app, const std::wstring& title)
+{
+    if (!solidworks_app || title.empty()) {
+        return false;
+    }
+
+    long errors = 0;
+    VARIANT args[3];
+    initIntByRefVariant(args[0], errors);
+    initBoolVariant(args[1], true);
+    initBstrVariant(args[2], title);
+
+    VARIANT result;
+    const HRESULT hr = invokeDispatch(solidworks_app, L"ActivateDoc3", DISPATCH_METHOD, args, 3, &result, false);
+    const bool success = SUCCEEDED(hr) && errors == 0;
+    VariantClear(&result);
+    clearVariants(args, 3);
+    return success;
+}
+
+bool saveModelDocAsStl(IDispatch* model_doc, const std::wstring& stl_path)
+{
+    VARIANT args[3];
+    initIntVariant(args[0], 1);  // swSaveAsOptions_Silent
+    initIntVariant(args[1], 0);  // swSaveAsCurrentVersion
+    initBstrVariant(args[2], stl_path);
+
+    VARIANT result;
+    const HRESULT hr = invokeDispatch(model_doc, L"SaveAs3", DISPATCH_METHOD, args, 3, &result);
+    const bool success = SUCCEEDED(hr) && variantIndicatesSuccess(result);
+    VariantClear(&result);
+    clearVariants(args, 3);
+
+    return success;
+}
+
+DispatchPtr startSolidWorks()
+{
+    CLSID clsid{};
+    HRESULT hr = CLSIDFromProgID(L"SldWorks.Application", &clsid);
+    if (FAILED(hr)) {
+        spdlog::error("未找到SolidWorks.Application COM组件，无法导入SLDPRT");
+        return {};
+    }
+
+    IDispatch* dispatch = nullptr;
+    hr = CoCreateInstance(clsid,
+                          nullptr,
+                          CLSCTX_LOCAL_SERVER,
+                          IID_IDispatch,
+                          reinterpret_cast<void**>(&dispatch));
+    if (FAILED(hr) || !dispatch) {
+        spdlog::error("启动SolidWorks失败，无法导入SLDPRT (hr=0x{:08X})", static_cast<unsigned>(hr));
+        return {};
+    }
+
+    setBoolProperty(dispatch, L"Visible", false);
+    return DispatchPtr(dispatch);
+}
+
+DispatchPtr openSolidWorksPart(IDispatch* solidworks_app,
+                               const std::wstring& source_path,
+                               long& errors,
+                               long& warnings)
+{
+    errors = 0;
+    warnings = 0;
+
+    VARIANT args[6];
+    initIntByRefVariant(args[0], warnings);
+    initIntByRefVariant(args[1], errors);
+    initBstrVariant(args[2], L"");
+    initIntVariant(args[3], 1);  // swOpenDocOptions_Silent
+    initIntVariant(args[4], 1);  // swDocPART
+    initBstrVariant(args[5], source_path);
+
+    VARIANT result;
+    const HRESULT hr = invokeDispatch(solidworks_app, L"OpenDoc6", DISPATCH_METHOD, args, 6, &result);
+    clearVariants(args, 6);
+    if (FAILED(hr)) {
+        VariantClear(&result);
+        return {};
+    }
+
+    DispatchPtr document = dispatchFromVariant(result);
+    VariantClear(&result);
+    return document;
+}
+
+void closeSolidWorksDocument(IDispatch* solidworks_app, IDispatch* model_doc)
+{
+    std::wstring title = getMethodString(model_doc, L"GetTitle");
+    if (title.empty()) {
+        return;
+    }
+
+    VARIANT arg;
+    initBstrVariant(arg, title);
+    invokeDispatch(solidworks_app, L"CloseDoc", DISPATCH_METHOD, &arg, 1, nullptr, false);
+    VariantClear(&arg);
+}
+
+void exitSolidWorks(IDispatch* solidworks_app)
+{
+    invokeDispatch(solidworks_app, L"ExitApp", DISPATCH_METHOD, nullptr, 0, nullptr, false);
+}
+
+std::filesystem::path makeTemporaryStlPath(const std::filesystem::path& source_path)
+{
+    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    const DWORD pid = GetCurrentProcessId();
+    const std::wstring suffix = L"_nbcam_" + std::to_wstring(pid) + L"_" + std::to_wstring(now) + L".stl";
+    return std::filesystem::temp_directory_path() / (source_path.stem().wstring() + suffix);
+}
+
+std::string pathToUtf8String(const std::filesystem::path& path)
+{
+    return path.u8string();
+}
+
+}  // namespace
+
+std::unique_ptr<TriangleMesh> MeshIO::loadSLDPRT(const std::string& filepath) {
+    ComApartment com;
+    if (!com.isUsable()) {
+        spdlog::error("初始化COM失败，无法导入SLDPRT (hr=0x{:08X})", static_cast<unsigned>(com.result()));
+        return nullptr;
+    }
+
+    const std::filesystem::path source_path = std::filesystem::absolute(std::filesystem::u8path(filepath));
+    if (!std::filesystem::exists(source_path)) {
+        spdlog::error("无法打开SLDPRT文件: {}", filepath);
+        return nullptr;
+    }
+
+    const std::wstring source_wide = source_path.wstring();
+    const std::filesystem::path temp_stl = makeTemporaryStlPath(source_path);
+    const std::wstring temp_stl_wide = temp_stl.wstring();
+
+    std::error_code ec;
+    std::filesystem::remove(temp_stl, ec);
+
+    DispatchPtr solidworks_app = startSolidWorks();
+    if (!solidworks_app) {
+        return nullptr;
+    }
+
+    long open_errors = 0;
+    long open_warnings = 0;
+    DispatchPtr model_doc = openSolidWorksPart(solidworks_app.get(),
+                                               source_wide,
+                                               open_errors,
+                                               open_warnings);
+    if (!model_doc) {
+        spdlog::error("SolidWorks打开SLDPRT失败: {}, errors={}, warnings={}",
+                      filepath,
+                      open_errors,
+                      open_warnings);
+        exitSolidWorks(solidworks_app.get());
+        return nullptr;
+    }
+
+    const long unit_code = getSolidWorksDocUnitCode(model_doc.get());
+    const double unit_to_mm = solidWorksLengthUnitToMillimeters(unit_code);
+    const std::wstring title = getMethodString(model_doc.get(), L"GetTitle");
+    if (!activateSolidWorksDocument(solidworks_app.get(), title)) {
+        spdlog::warn("SolidWorks激活文档失败，继续尝试导出STL: {}", filepath);
+    }
+
+    const bool saved = saveModelDocAsStl(model_doc.get(), temp_stl_wide);
+    closeSolidWorksDocument(solidworks_app.get(), model_doc.get());
+    exitSolidWorks(solidworks_app.get());
+
+    if (!saved || !std::filesystem::exists(temp_stl) || std::filesystem::file_size(temp_stl, ec) == 0) {
+        spdlog::error("SolidWorks导出临时STL失败: {}", pathToUtf8String(temp_stl));
+        std::filesystem::remove(temp_stl, ec);
+        return nullptr;
+    }
+
+    auto mesh = loadSTL(pathToUtf8String(temp_stl));
+    std::filesystem::remove(temp_stl, ec);
+    if (!mesh || !mesh->isValid()) {
+        spdlog::error("SLDPRT转换后的STL读取失败: {}", filepath);
+        return nullptr;
+    }
+    scaleMesh(*mesh, unit_to_mm);
+
+    spdlog::info("加载SLDPRT文件成功: {} 顶点, {} 三角面, unit_code={}, scale_to_mm={}",
+                 mesh->vertices.size(),
+                 mesh->triangles.size(),
+                 unit_code,
+                 unit_to_mm);
+    return mesh;
+}
+#else
+std::unique_ptr<TriangleMesh> MeshIO::loadSLDPRT(const std::string& filepath) {
+    spdlog::error("当前平台不支持SLDPRT导入: {}", filepath);
+    return nullptr;
+}
+#endif
 
 std::unique_ptr<TriangleMesh> MeshIO::loadOBJ(const std::string& filepath) {
     auto mesh = std::make_unique<TriangleMesh>();

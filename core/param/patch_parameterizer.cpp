@@ -1,4 +1,5 @@
 #include "patch_parameterizer.h"
+#include "abf_parameterizer.h"
 #include "lscm_parameterizer.h"
 #include "arap_parameterizer.h"
 #include "authalic_parameterizer.h"
@@ -118,7 +119,10 @@ ParameterizationResult PatchParameterizer::parameterizePatch(
     
     // 根据算法选择参数化器
     ParameterizationResult submesh_result_param;
-    if (algorithm == "ARAP") {
+    if (algorithm == "ABF") {
+        ABFParameterizer parameterizer;
+        submesh_result_param = parameterizer.parameterize(*submesh_result.submesh);
+    } else if (algorithm == "ARAP") {
         ARAPParameterizer parameterizer;
         submesh_result_param = parameterizer.parameterize(*submesh_result.submesh);
     } else if (algorithm == "AUTHALIC") {
